@@ -59,6 +59,26 @@ type app struct {
 	thumbMu   sync.Map
 }
 
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	n, err := r.ResponseWriter.Write(p)
+	r.bytes += n
+	return n, err
+}
+
 type listEntry struct {
 	Name    string `json:"name"`
 	Path    string `json:"path"`
@@ -85,7 +105,7 @@ func main() {
 	var hist string
 
 	flag.Var(&dirs, "d", "host path to expose (repeatable)")
-	flag.StringVar(&addr, "addr", ":8080", "listen address")
+	flag.StringVar(&addr, "addr", ":7111", "listen address")
 	flag.StringVar(&password, "password", "", "optional shared password")
 	flag.StringVar(&hist, "hist", "", "thumbnail cache directory")
 	flag.Parse()
@@ -99,7 +119,15 @@ func main() {
 	}
 
 	if hist == "" {
-		hist = filepath.Join(os.TempDir(), "rakuyo-hist")
+		xdgDataHome := os.Getenv("XDG_DATA_HOME")
+		if xdgDataHome == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				log.Fatalf("failed to determine home directory for default --hist: %v", err)
+			}
+			xdgDataHome = filepath.Join(home, ".local", "share")
+		}
+		hist = filepath.Join(xdgDataHome, "rakuyo", "hist")
 	}
 
 	histPath, err := expandPath(hist)
@@ -167,6 +195,9 @@ func main() {
 		log.Printf("root %d: %s (%s)", rt.ID, rt.Path, rt.Name)
 	}
 	log.Printf("thumb cache: %s", histPath)
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		log.Printf("warning: ffmpeg not found, video thumbnails will fail: %v", err)
+	}
 	if password != "" {
 		log.Printf("auth: enabled")
 	} else {
@@ -181,8 +212,12 @@ func main() {
 func logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		if rec.status == 0 {
+			rec.status = http.StatusOK
+		}
+		log.Printf("%s %s %d %dB %s", r.Method, r.URL.Path, rec.status, rec.bytes, time.Since(start).Round(time.Millisecond))
 	})
 }
 
@@ -454,7 +489,7 @@ func (a *app) handleThumb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tmp := cachePath + ".tmp"
+	tmp := cachePath + ".tmp.jpg"
 	switch mediaType {
 	case "image":
 		err = generateImageThumb(real, tmp, size)
@@ -462,10 +497,12 @@ func (a *app) handleThumb(w http.ResponseWriter, r *http.Request) {
 		err = generateVideoThumb(real, tmp, size)
 	}
 	if err != nil {
+		log.Printf("thumb failed media=%s root=%d rel=%q real=%q err=%v", mediaType, root.ID, rel, real, err)
 		http.Error(w, fmt.Sprintf("thumbnail error: %v", err), http.StatusInternalServerError)
 		return
 	}
 	if err := os.Rename(tmp, cachePath); err != nil {
+		log.Printf("thumb cache write failed root=%d rel=%q cache=%q err=%v", root.ID, rel, cachePath, err)
 		http.Error(w, "thumbnail cache write error", http.StatusInternalServerError)
 		return
 	}
