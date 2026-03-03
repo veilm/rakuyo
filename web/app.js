@@ -84,6 +84,13 @@ function fileURL(entryPath) {
   return `/api/file?${q.toString()}`;
 }
 
+function browseURL(rootId, entryPath) {
+  const q = new URLSearchParams({ root: String(rootId) });
+  if (entryPath) q.set("path", entryPath);
+  const query = q.toString();
+  return query ? `${window.location.pathname}?${query}` : window.location.pathname;
+}
+
 function clearViewer() {
   viewerBody.innerHTML = "";
 }
@@ -195,6 +202,7 @@ async function loadList(options = {}) {
       state.path = parentPath(state.path);
       loadList({ pushURL: true });
     });
+    tr.querySelector("#upLink").href = browseURL(state.rootId, parentPath(state.path));
     entriesEl.appendChild(tr);
   }
 
@@ -204,8 +212,11 @@ async function loadList(options = {}) {
     const thumb = node.querySelector(".thumb");
 
     link.textContent = entry.name;
-    link.href = "#";
+    link.href = entry.isDir ? browseURL(state.rootId, entry.path) : fileURL(entry.path);
     link.addEventListener("click", (e) => {
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) {
+        return;
+      }
       e.preventDefault();
       if (entry.isDir) {
         state.path = entry.path;

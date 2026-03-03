@@ -187,6 +187,10 @@ func main() {
 	mux.HandleFunc("/api/thumb", a.withAuth(a.handleThumb))
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("web"))))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		http.ServeFile(w, r, filepath.Join("web", "index.html"))
 	})
 
