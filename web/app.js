@@ -15,6 +15,10 @@ const locationEl = document.getElementById("location");
 const upBtn = document.getElementById("upBtn");
 const logoutBtn = document.getElementById("logoutBtn");
 const rowTemplate = document.getElementById("rowTemplate");
+const viewerModal = document.getElementById("viewerModal");
+const viewerBody = document.getElementById("viewerBody");
+const viewerTitle = document.getElementById("viewerTitle");
+const viewerClose = document.getElementById("viewerClose");
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -54,6 +58,74 @@ function setVisible(isBrowser) {
   loginPanel.classList.toggle("hidden", isBrowser);
 }
 
+function setURLFromState(replace) {
+  const qs = new URLSearchParams();
+  if (state.rootId !== null) qs.set("root", String(state.rootId));
+  if (state.path) qs.set("path", state.path);
+  const query = qs.toString();
+  const nextURL = query ? `${window.location.pathname}?${query}` : window.location.pathname;
+  if (replace) {
+    window.history.replaceState({ rootId: state.rootId, path: state.path }, "", nextURL);
+  } else {
+    window.history.pushState({ rootId: state.rootId, path: state.path }, "", nextURL);
+  }
+}
+
+function applyStateFromURL() {
+  const qs = new URLSearchParams(window.location.search);
+  const root = qs.get("root");
+  const p = qs.get("path");
+  state.rootId = root === null ? null : Number(root);
+  state.path = p || "";
+}
+
+function fileURL(entryPath) {
+  const q = new URLSearchParams({ root: String(state.rootId), path: entryPath });
+  return `/api/file?${q.toString()}`;
+}
+
+function clearViewer() {
+  viewerBody.innerHTML = "";
+}
+
+function closeViewer() {
+  clearViewer();
+  viewerModal.classList.add("hidden");
+}
+
+function openViewer(entry) {
+  const src = fileURL(entry.path);
+  const mime = entry.mime || "";
+  viewerTitle.textContent = entry.name;
+  clearViewer();
+  if (mime.startsWith("image/")) {
+    const img = document.createElement("img");
+    img.src = src;
+    img.alt = entry.name;
+    viewerBody.appendChild(img);
+  } else if (mime.startsWith("video/")) {
+    const video = document.createElement("video");
+    video.src = src;
+    video.controls = true;
+    video.autoplay = true;
+    viewerBody.appendChild(video);
+  } else if (mime.startsWith("audio/")) {
+    const audio = document.createElement("audio");
+    audio.src = src;
+    audio.controls = true;
+    audio.autoplay = true;
+    viewerBody.appendChild(audio);
+  } else {
+    const link = document.createElement("a");
+    link.href = src;
+    link.textContent = "Open file";
+    link.target = "_blank";
+    link.rel = "noopener";
+    viewerBody.appendChild(link);
+  }
+  viewerModal.classList.remove("hidden");
+}
+
 async function loadRoots() {
   const res = await api("/api/roots");
   if (res.status === 401) {
@@ -81,7 +153,10 @@ async function loadRoots() {
     return true;
   }
 
-  if (state.rootId === null) {
+  if (state.rootId === null || Number.isNaN(state.rootId)) {
+    state.rootId = state.roots[0].id;
+  }
+  if (!state.roots.some((r) => r.id === state.rootId)) {
     state.rootId = state.roots[0].id;
   }
   rootSelect.value = String(state.rootId);
@@ -89,8 +164,10 @@ async function loadRoots() {
   return true;
 }
 
-async function loadList() {
+async function loadList(options = {}) {
   if (state.rootId === null) return;
+  const replaceURL = options.replaceURL ?? false;
+  const pushURL = options.pushURL ?? false;
   const q = new URLSearchParams({ root: String(state.rootId), path: state.path });
   const res = await api(`/api/list?${q.toString()}`);
   if (res.status === 401) {
@@ -103,6 +180,9 @@ async function loadList() {
   const data = await res.json();
 
   state.path = data.path || "";
+  if (replaceURL || pushURL) {
+    setURLFromState(replaceURL);
+  }
   locationEl.textContent = `${data.rootPath}/${state.path}`.replace(/\/+/g, "/");
   upBtn.disabled = state.path === "";
 
@@ -113,7 +193,7 @@ async function loadList() {
     tr.querySelector("#upLink").addEventListener("click", (e) => {
       e.preventDefault();
       state.path = parentPath(state.path);
-      loadList();
+      loadList({ pushURL: true });
     });
     entriesEl.appendChild(tr);
   }
@@ -129,10 +209,9 @@ async function loadList() {
       e.preventDefault();
       if (entry.isDir) {
         state.path = entry.path;
-        loadList();
+        loadList({ pushURL: true });
       } else {
-        const fq = new URLSearchParams({ root: String(state.rootId), path: entry.path });
-        window.open(`/api/file?${fq.toString()}`, "_blank", "noopener");
+        openViewer(entry);
       }
     });
 
@@ -168,19 +247,19 @@ loginForm.addEventListener("submit", async (e) => {
   passwordInput.value = "";
   const ok = await loadRoots();
   if (ok) {
-    await loadList();
+    await loadList({ replaceURL: true });
   }
 });
 
 rootSelect.addEventListener("change", async () => {
   state.rootId = Number(rootSelect.value);
   state.path = "";
-  await loadList();
+  await loadList({ pushURL: true });
 });
 
 upBtn.addEventListener("click", async () => {
   state.path = parentPath(state.path);
-  await loadList();
+  await loadList({ pushURL: true });
 });
 
 logoutBtn.addEventListener("click", async () => {
@@ -188,11 +267,25 @@ logoutBtn.addEventListener("click", async () => {
   setVisible(false);
 });
 
+viewerClose.addEventListener("click", () => closeViewer());
+viewerModal.querySelector(".viewerBackdrop").addEventListener("click", () => closeViewer());
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !viewerModal.classList.contains("hidden")) {
+    closeViewer();
+  }
+});
+window.addEventListener("popstate", async () => {
+  applyStateFromURL();
+  await loadRoots();
+  await loadList();
+});
+
 (async function init() {
   try {
+    applyStateFromURL();
     const ok = await loadRoots();
     if (ok) {
-      await loadList();
+      await loadList({ replaceURL: true });
     }
   } catch (err) {
     console.error(err);
