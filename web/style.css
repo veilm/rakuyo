@@ -157,6 +157,10 @@ td {
   place-items: center;
 }
 
+.viewerModal.hidden {
+  display: none;
+}
+
 .viewerBackdrop {
   position: absolute;
   inset: 0;
