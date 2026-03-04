@@ -13,6 +13,19 @@
         <div id="location"></div>
       </div>
       <div class="topbar-actions">
+        <select id="viewModeSelect" title="View mode">
+          <option value="list">List</option>
+          <option value="gallery">Gallery</option>
+        </select>
+        <select id="themeSelect" title="Theme">
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+        <label class="gridSizeCtl" for="gridSizeInput">
+          Size
+          <input id="gridSizeInput" type="range" min="120" max="320" step="20" />
+          <span id="gridSizeValue"></span>
+        </label>
         <select id="rootSelect"></select>
         <button id="upBtn" type="button">Up</button>
         <button id="logoutBtn" type="button">Logout</button>
@@ -33,17 +46,22 @@
       </section>
 
       <section id="browserPanel" class="panel hidden">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Type</th>
-              <th>Size</th>
-              <th>Modified</th>
-            </tr>
-          </thead>
-          <tbody id="entries"></tbody>
-        </table>
+        <div id="listWrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Size</th>
+                <th>Modified</th>
+              </tr>
+            </thead>
+            <tbody id="entries"></tbody>
+          </table>
+        </div>
+        <div id="galleryWrap" class="hidden">
+          <div id="galleryEntries" class="galleryGrid"></div>
+        </div>
       </section>
     </main>
 
