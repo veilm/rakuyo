@@ -2,6 +2,14 @@ const state = {
   roots: [],
   rootId: null,
   path: "",
+  entries: [],
+  rootPath: "",
+};
+
+const settings = {
+  viewMode: "list",
+  theme: "light",
+  gridSize: 200,
 };
 
 const loginPanel = document.getElementById("loginPanel");
@@ -11,14 +19,25 @@ const loginError = document.getElementById("loginError");
 const passwordInput = document.getElementById("passwordInput");
 const rootSelect = document.getElementById("rootSelect");
 const entriesEl = document.getElementById("entries");
+const galleryEntriesEl = document.getElementById("galleryEntries");
+const listWrap = document.getElementById("listWrap");
+const galleryWrap = document.getElementById("galleryWrap");
 const locationEl = document.getElementById("location");
 const upBtn = document.getElementById("upBtn");
 const logoutBtn = document.getElementById("logoutBtn");
 const rowTemplate = document.getElementById("rowTemplate");
+const viewModeSelect = document.getElementById("viewModeSelect");
+const themeSelect = document.getElementById("themeSelect");
+const gridSizeInput = document.getElementById("gridSizeInput");
+const gridSizeValue = document.getElementById("gridSizeValue");
+const gridSizeCtl = document.querySelector(".gridSizeCtl");
 const viewerModal = document.getElementById("viewerModal");
 const viewerBody = document.getElementById("viewerBody");
 const viewerTitle = document.getElementById("viewerTitle");
 const viewerClose = document.getElementById("viewerClose");
+
+const folderSVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>';
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -26,6 +45,60 @@ async function api(path, options = {}) {
     ...options,
   });
   return res;
+}
+
+function getCookie(name) {
+  const wanted = `${name}=`;
+  for (const part of document.cookie.split(";")) {
+    const v = part.trim();
+    if (v.startsWith(wanted)) {
+      return decodeURIComponent(v.slice(wanted.length));
+    }
+  }
+  return "";
+}
+
+function setCookie(name, value) {
+  document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=31536000; SameSite=Lax`;
+}
+
+function clamp(n, min, max) {
+  return Math.min(max, Math.max(min, n));
+}
+
+function loadSettingsFromCookies() {
+  const viewMode = getCookie("rakuyo_view_mode");
+  const theme = getCookie("rakuyo_theme");
+  const gridSizeRaw = parseInt(getCookie("rakuyo_grid_size"), 10);
+
+  if (viewMode === "gallery" || viewMode === "list") {
+    settings.viewMode = viewMode;
+  }
+  if (theme === "dark" || theme === "light") {
+    settings.theme = theme;
+  }
+  if (Number.isFinite(gridSizeRaw)) {
+    settings.gridSize = clamp(gridSizeRaw, 120, 320);
+  }
+}
+
+function applyTheme() {
+  document.body.dataset.theme = settings.theme;
+  themeSelect.value = settings.theme;
+}
+
+function applyViewMode() {
+  const gallery = settings.viewMode === "gallery";
+  viewModeSelect.value = settings.viewMode;
+  listWrap.classList.toggle("hidden", gallery);
+  galleryWrap.classList.toggle("hidden", !gallery);
+  gridSizeCtl.classList.toggle("hidden", !gallery);
+}
+
+function applyGridSize() {
+  galleryEntriesEl.style.setProperty("--grid-size", `${settings.gridSize}px`);
+  gridSizeInput.value = String(settings.gridSize);
+  gridSizeValue.textContent = `${settings.gridSize}`;
 }
 
 function fmtSize(bytes) {
@@ -84,6 +157,11 @@ function fileURL(entryPath) {
   return `/api/file?${q.toString()}`;
 }
 
+function thumbURL(entryPath, size) {
+  const q = new URLSearchParams({ root: String(state.rootId), path: entryPath, size: String(size) });
+  return `/api/thumb?${q.toString()}`;
+}
+
 function browseURL(rootId, entryPath) {
   const q = new URLSearchParams({ root: String(rootId) });
   if (entryPath) q.set("path", entryPath);
@@ -133,6 +211,119 @@ function openViewer(entry) {
   viewerModal.classList.remove("hidden");
 }
 
+function setupEntryClick(link, entry) {
+  link.href = entry.isDir ? browseURL(state.rootId, entry.path) : fileURL(entry.path);
+  link.addEventListener("click", (e) => {
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) {
+      return;
+    }
+    e.preventDefault();
+    if (entry.isDir) {
+      state.path = entry.path;
+      loadList({ pushURL: true });
+    } else {
+      openViewer(entry);
+    }
+  });
+}
+
+function renderList(entries) {
+  entriesEl.innerHTML = "";
+  if (state.path !== "") {
+    const tr = document.createElement("tr");
+    const up = parentPath(state.path);
+    tr.innerHTML = '<td colspan="4"><a href="#" id="upLink">..</a></td>';
+    const upLink = tr.querySelector("#upLink");
+    upLink.href = browseURL(state.rootId, up);
+    upLink.addEventListener("click", (e) => {
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) {
+        return;
+      }
+      e.preventDefault();
+      state.path = up;
+      loadList({ pushURL: true });
+    });
+    entriesEl.appendChild(tr);
+  }
+
+  for (const entry of entries) {
+    const node = rowTemplate.content.firstElementChild.cloneNode(true);
+    const link = node.querySelector(".entryLink");
+    const thumb = node.querySelector(".thumb");
+
+    link.textContent = entry.name;
+    setupEntryClick(link, entry);
+
+    node.querySelector(".typeCell").textContent = entry.isDir ? "dir" : entry.mime || "file";
+    node.querySelector(".sizeCell").textContent = entry.isDir ? "-" : fmtSize(entry.size);
+    node.querySelector(".timeCell").textContent = fmtTime(entry.modTime);
+
+    if (entry.thumb && !entry.isDir) {
+      thumb.src = thumbURL(entry.path, 256);
+      thumb.onerror = () => thumb.classList.add("hidden");
+      thumb.classList.remove("hidden");
+    } else {
+      thumb.classList.add("hidden");
+    }
+
+    entriesEl.appendChild(node);
+  }
+}
+
+function renderGallery(entries) {
+  galleryEntriesEl.innerHTML = "";
+  if (state.path !== "") {
+    const up = document.createElement("a");
+    up.className = "gup";
+    up.href = browseURL(state.rootId, parentPath(state.path));
+    up.textContent = "..";
+    up.addEventListener("click", (e) => {
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) {
+        return;
+      }
+      e.preventDefault();
+      state.path = parentPath(state.path);
+      loadList({ pushURL: true });
+    });
+    galleryEntriesEl.appendChild(up);
+  }
+
+  const thumbSize = clamp(Math.round(settings.gridSize * 1.8), 200, 768);
+
+  for (const entry of entries) {
+    const link = document.createElement("a");
+    link.className = "glink";
+    setupEntryClick(link, entry);
+
+    const card = document.createElement("div");
+    card.className = "gcard";
+
+    if (entry.isDir) {
+      const folder = document.createElement("div");
+      folder.className = "gfolder";
+      folder.innerHTML = folderSVG;
+      card.appendChild(folder);
+    } else if (entry.thumb) {
+      const img = document.createElement("img");
+      img.className = "gthumb";
+      img.alt = entry.name;
+      img.src = thumbURL(entry.path, thumbSize);
+      img.onerror = () => {
+        img.remove();
+      };
+      card.appendChild(img);
+    }
+
+    const label = document.createElement("div");
+    label.className = `glabel ${entry.isDir ? "glabel-dir" : ""}`.trim();
+    label.textContent = entry.name;
+    card.appendChild(label);
+
+    link.appendChild(card);
+    galleryEntriesEl.appendChild(link);
+  }
+}
+
 async function loadRoots() {
   const res = await api("/api/roots");
   if (res.status === 401) {
@@ -156,6 +347,7 @@ async function loadRoots() {
   if (state.roots.length === 0) {
     locationEl.textContent = "No roots configured";
     entriesEl.innerHTML = "";
+    galleryEntriesEl.innerHTML = "";
     setVisible(true);
     return true;
   }
@@ -187,59 +379,17 @@ async function loadList(options = {}) {
   const data = await res.json();
 
   state.path = data.path || "";
+  state.entries = data.entries || [];
+  state.rootPath = data.rootPath || "";
+
   if (replaceURL || pushURL) {
     setURLFromState(replaceURL);
   }
-  locationEl.textContent = `${data.rootPath}/${state.path}`.replace(/\/+/g, "/");
+  locationEl.textContent = `${state.rootPath}/${state.path}`.replace(/\/+/g, "/");
   upBtn.disabled = state.path === "";
 
-  entriesEl.innerHTML = "";
-  if (state.path !== "") {
-    const tr = document.createElement("tr");
-    tr.innerHTML = '<td colspan="4"><a href="#" id="upLink">..</a></td>';
-    tr.querySelector("#upLink").addEventListener("click", (e) => {
-      e.preventDefault();
-      state.path = parentPath(state.path);
-      loadList({ pushURL: true });
-    });
-    tr.querySelector("#upLink").href = browseURL(state.rootId, parentPath(state.path));
-    entriesEl.appendChild(tr);
-  }
-
-  for (const entry of data.entries) {
-    const node = rowTemplate.content.firstElementChild.cloneNode(true);
-    const link = node.querySelector(".entryLink");
-    const thumb = node.querySelector(".thumb");
-
-    link.textContent = entry.name;
-    link.href = entry.isDir ? browseURL(state.rootId, entry.path) : fileURL(entry.path);
-    link.addEventListener("click", (e) => {
-      if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) {
-        return;
-      }
-      e.preventDefault();
-      if (entry.isDir) {
-        state.path = entry.path;
-        loadList({ pushURL: true });
-      } else {
-        openViewer(entry);
-      }
-    });
-
-    node.querySelector(".typeCell").textContent = entry.isDir ? "dir" : entry.mime || "file";
-    node.querySelector(".sizeCell").textContent = entry.isDir ? "-" : fmtSize(entry.size);
-    node.querySelector(".timeCell").textContent = fmtTime(entry.modTime);
-
-    if (entry.thumb && !entry.isDir) {
-      const tq = new URLSearchParams({ root: String(state.rootId), path: entry.path, size: "256" });
-      thumb.src = `/api/thumb?${tq.toString()}`;
-      thumb.onerror = () => thumb.classList.add("hidden");
-    } else {
-      thumb.classList.add("hidden");
-    }
-
-    entriesEl.appendChild(node);
-  }
+  renderList(state.entries);
+  renderGallery(state.entries);
 }
 
 loginForm.addEventListener("submit", async (e) => {
@@ -278,6 +428,27 @@ logoutBtn.addEventListener("click", async () => {
   setVisible(false);
 });
 
+viewModeSelect.addEventListener("change", () => {
+  settings.viewMode = viewModeSelect.value === "gallery" ? "gallery" : "list";
+  setCookie("rakuyo_view_mode", settings.viewMode);
+  applyViewMode();
+});
+
+themeSelect.addEventListener("change", () => {
+  settings.theme = themeSelect.value === "dark" ? "dark" : "light";
+  setCookie("rakuyo_theme", settings.theme);
+  applyTheme();
+});
+
+gridSizeInput.addEventListener("input", () => {
+  settings.gridSize = clamp(parseInt(gridSizeInput.value, 10) || 200, 120, 320);
+  setCookie("rakuyo_grid_size", String(settings.gridSize));
+  applyGridSize();
+  if (settings.viewMode === "gallery") {
+    renderGallery(state.entries);
+  }
+});
+
 viewerClose.addEventListener("click", () => closeViewer());
 viewerModal.querySelector(".viewerBackdrop").addEventListener("click", () => closeViewer());
 window.addEventListener("keydown", (e) => {
@@ -291,7 +462,14 @@ window.addEventListener("popstate", async () => {
   await loadList();
 });
 
-(async function init() {
+(function init() {
+  loadSettingsFromCookies();
+  applyTheme();
+  applyGridSize();
+  applyViewMode();
+})();
+
+(async function initData() {
   try {
     applyStateFromURL();
     const ok = await loadRoots();
