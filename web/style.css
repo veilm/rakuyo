@@ -1,14 +1,14 @@
 :root {
-  --bg: #f2f4f8;
+  --bg: #f4f1eb;
   --card: #ffffff;
-  --line: #d8dee9;
-  --text: #1f2933;
-  --muted: #5b6b7a;
-  --accent: #145da0;
-  --danger: #b42318;
-  --surface-2: #f7f9fc;
-  --control-bg: #ffffff;
-  --control-text: #1f2933;
+  --line: #d8d1c5;
+  --text: #2b241d;
+  --muted: #6e6154;
+  --accent: #7a5230;
+  --danger: #b24633;
+  --surface-2: #f1ece4;
+  --control-bg: #fcf8f1;
+  --control-text: #2b241d;
 }
 
 * {
@@ -19,21 +19,21 @@ body {
   margin: 0;
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
   color: var(--text);
-  background: radial-gradient(circle at top left, #f8fbff 0, #eef2f8 40%, #e6ebf2 100%);
+  background: radial-gradient(circle at top left, #faf7f3 0, #f1ece4 40%, #e8e1d6 100%);
 }
 
 body[data-theme="dark"] {
-  --bg: #0d1424;
-  --card: #101b30;
-  --line: #21334d;
-  --text: #e9f0fb;
-  --muted: #9ab0cc;
-  --accent: #79b2ff;
+  --bg: #0f0b09;
+  --card: #1b1511;
+  --line: #3b3026;
+  --text: #f3e8d8;
+  --muted: #baa98f;
+  --accent: #c38a54;
   --danger: #ff8f8f;
-  --surface-2: #13213a;
-  --control-bg: #162741;
-  --control-text: #e9f0fb;
-  background: radial-gradient(circle at top left, #111b30 0, #0a1120 45%, #070d18 100%);
+  --surface-2: #241c16;
+  --control-bg: #2a2119;
+  --control-text: #f3e8d8;
+  background: radial-gradient(circle at top left, #2a1f17 0, #140f0c 45%, #080605 100%);
 }
 
 .topbar {
@@ -46,6 +46,7 @@ body[data-theme="dark"] {
   background: linear-gradient(90deg, var(--surface-2) 0, var(--card) 100%);
   position: sticky;
   top: 0;
+  z-index: 30;
 }
 
 h1 {
@@ -123,7 +124,7 @@ main {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--card);
-  box-shadow: 0 10px 25px rgba(18, 38, 63, 0.06);
+  box-shadow: 0 10px 25px rgba(43, 25, 10, 0.12);
   overflow: hidden;
 }
 
@@ -184,7 +185,7 @@ td {
   border-radius: 6px;
   border: 1px solid var(--line);
   object-fit: cover;
-  background: #f2f5fb;
+  background: #e7ddd1;
 }
 
 .thumb.hidden {
@@ -217,11 +218,11 @@ td {
   border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
-  background: #d7e0ef;
+  background: #d9cdbc;
 }
 
 body[data-theme="dark"] .gcard {
-  background: #15233c;
+  background: #2a2119;
 }
 
 .gthumb {
@@ -236,13 +237,13 @@ body[data-theme="dark"] .gcard {
   height: 100%;
   display: grid;
   place-items: center;
-  color: #1a4b88;
-  background: linear-gradient(140deg, #dbe8fb 0%, #c9dcf9 100%);
+  color: #7a5230;
+  background: linear-gradient(140deg, #efe4d6 0%, #dfcbb2 100%);
 }
 
 body[data-theme="dark"] .gfolder {
-  color: #9ac3ff;
-  background: linear-gradient(140deg, #1a2c4b 0%, #19345c 100%);
+  color: #d6af84;
+  background: linear-gradient(140deg, #3a2b1f 0%, #4a3729 100%);
 }
 
 .gfolder svg {
@@ -258,15 +259,15 @@ body[data-theme="dark"] .gfolder {
   bottom: 0;
   padding: 0.45rem 0.5rem;
   font-size: 0.82rem;
-  color: #f3f7ff;
-  background: linear-gradient(180deg, rgba(5, 11, 20, 0) 0%, rgba(5, 11, 20, 0.88) 85%);
+  color: #f8efe3;
+  background: linear-gradient(180deg, rgba(23, 16, 10, 0) 0%, rgba(23, 16, 10, 0.9) 85%);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .glabel.glabel-dir {
-  background: linear-gradient(180deg, rgba(8, 18, 32, 0) 0%, rgba(11, 28, 52, 0.9) 90%);
+  background: linear-gradient(180deg, rgba(21, 14, 9, 0) 0%, rgba(38, 25, 15, 0.92) 90%);
 }
 
 .glink {
@@ -303,7 +304,7 @@ body[data-theme="dark"] .gfolder {
 .viewerBackdrop {
   position: absolute;
   inset: 0;
-  background: rgba(18, 24, 38, 0.72);
+  background: rgba(14, 9, 7, 0.75);
 }
 
 .viewerCard {
@@ -311,8 +312,8 @@ body[data-theme="dark"] .gfolder {
   z-index: 1;
   width: min(1100px, 94vw);
   max-height: 88vh;
-  background: #0f1727;
-  border: 1px solid #233046;
+  background: #16100d;
+  border: 1px solid #3d2f22;
   border-radius: 12px;
   display: flex;
   flex-direction: column;
@@ -325,8 +326,8 @@ body[data-theme="dark"] .gfolder {
   gap: 1rem;
   align-items: center;
   padding: 0.55rem 0.8rem;
-  border-bottom: 1px solid #233046;
-  color: #e5ebf7;
+  border-bottom: 1px solid #3d2f22;
+  color: #f3e8d8;
 }
 
 #viewerTitle {
