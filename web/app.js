@@ -78,7 +78,7 @@ function loadSettingsFromCookies() {
     settings.theme = theme;
   }
   if (Number.isFinite(gridSizeRaw)) {
-    settings.gridSize = clamp(gridSizeRaw, 120, 320);
+    settings.gridSize = clamp(gridSizeRaw, 60, 320);
   }
 }
 
@@ -441,7 +441,7 @@ themeSelect.addEventListener("change", () => {
 });
 
 gridSizeInput.addEventListener("input", () => {
-  settings.gridSize = clamp(parseInt(gridSizeInput.value, 10) || 200, 120, 320);
+  settings.gridSize = clamp(parseInt(gridSizeInput.value, 10) || 200, 60, 320);
   setCookie("rakuyo_grid_size", String(settings.gridSize));
   applyGridSize();
   if (settings.viewMode === "gallery") {
