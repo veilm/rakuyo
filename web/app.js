@@ -35,6 +35,7 @@ const viewerModal = document.getElementById("viewerModal");
 const viewerBody = document.getElementById("viewerBody");
 const viewerTitle = document.getElementById("viewerTitle");
 const viewerClose = document.getElementById("viewerClose");
+let thumbObserver = null;
 
 const folderSVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>';
@@ -227,6 +228,45 @@ function setupEntryClick(link, entry) {
   });
 }
 
+function ensureThumbObserver() {
+  if (thumbObserver || !("IntersectionObserver" in window)) {
+    return;
+  }
+  thumbObserver = new IntersectionObserver(
+    (obsEntries) => {
+      for (const ent of obsEntries) {
+        if (!ent.isIntersecting) continue;
+        const img = ent.target;
+        const src = img.dataset.src;
+        if (src && !img.src) {
+          img.src = src;
+        }
+        thumbObserver.unobserve(img);
+      }
+    },
+    {
+      root: null,
+      rootMargin: "300px 0px",
+      threshold: 0.01,
+    },
+  );
+}
+
+function queueThumbLoad(img, src) {
+  img.dataset.src = src;
+  img.removeAttribute("src");
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.classList.remove("hidden");
+
+  if (!("IntersectionObserver" in window)) {
+    img.src = src;
+    return;
+  }
+  ensureThumbObserver();
+  thumbObserver.observe(img);
+}
+
 function renderList(entries) {
   entriesEl.innerHTML = "";
   if (state.path !== "") {
@@ -259,9 +299,8 @@ function renderList(entries) {
     node.querySelector(".timeCell").textContent = fmtTime(entry.modTime);
 
     if (entry.thumb && !entry.isDir) {
-      thumb.src = thumbURL(entry.path, 256);
+      queueThumbLoad(thumb, thumbURL(entry.path, 256));
       thumb.onerror = () => thumb.classList.add("hidden");
-      thumb.classList.remove("hidden");
     } else {
       thumb.classList.add("hidden");
     }
@@ -307,7 +346,7 @@ function renderGallery(entries) {
       const img = document.createElement("img");
       img.className = "gthumb";
       img.alt = entry.name;
-      img.src = thumbURL(entry.path, thumbSize);
+      queueThumbLoad(img, thumbURL(entry.path, thumbSize));
       img.onerror = () => {
         img.remove();
       };
@@ -388,6 +427,9 @@ async function loadList(options = {}) {
   locationEl.textContent = `${state.rootPath}/${state.path}`.replace(/\/+/g, "/");
   upBtn.disabled = state.path === "";
 
+  if (thumbObserver) {
+    thumbObserver.disconnect();
+  }
   renderList(state.entries);
   renderGallery(state.entries);
 }

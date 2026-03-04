@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -26,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/image/draw"
@@ -52,11 +54,13 @@ type rootMount struct {
 }
 
 type app struct {
-	roots     []rootMount
-	histDir   string
-	password  string
-	authToken string
-	thumbMu   sync.Map
+	roots            []rootMount
+	histDir          string
+	password         string
+	authToken        string
+	thumbMu          sync.Map
+	thumbSem         chan struct{}
+	activeFileStream atomic.Int64
 }
 
 type statusRecorder struct {
@@ -172,6 +176,7 @@ func main() {
 		roots:    roots,
 		histDir:  histPath,
 		password: password,
+		thumbSem: make(chan struct{}, 1),
 	}
 	if password != "" {
 		tok := sha256.Sum256([]byte("rakuyo|" + password))
@@ -417,6 +422,8 @@ func (a *app) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	a.activeFileStream.Add(1)
+	defer a.activeFileStream.Add(-1)
 	http.ServeContent(w, r, filepath.Base(real), st.ModTime(), f)
 }
 
@@ -493,6 +500,12 @@ func (a *app) handleThumb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := a.acquireThumbSlot(r.Context()); err != nil {
+		http.Error(w, "thumbnail canceled", http.StatusRequestTimeout)
+		return
+	}
+	defer a.releaseThumbSlot()
+
 	tmp := cachePath + ".tmp.jpg"
 	switch mediaType {
 	case "image":
@@ -512,6 +525,36 @@ func (a *app) handleThumb(w http.ResponseWriter, r *http.Request) {
 	}
 
 	serveThumbFile(w, r, cachePath)
+}
+
+func (a *app) acquireThumbSlot(ctx context.Context) error {
+	for {
+		if a.activeFileStream.Load() > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(80 * time.Millisecond):
+			}
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case a.thumbSem <- struct{}{}:
+			if a.activeFileStream.Load() == 0 {
+				return nil
+			}
+			<-a.thumbSem
+		}
+	}
+}
+
+func (a *app) releaseThumbSlot() {
+	select {
+	case <-a.thumbSem:
+	default:
+	}
 }
 
 func (a *app) getRoot(id int) (rootMount, bool) {
