@@ -102,6 +102,39 @@ type listResponse struct {
 	Entries  []listEntry `json:"entries"`
 }
 
+type ffprobeOutput struct {
+	Streams []ffprobeStream `json:"streams"`
+}
+
+type ffprobeStream struct {
+	Index       int               `json:"index"`
+	CodecName   string            `json:"codec_name"`
+	CodecType   string            `json:"codec_type"`
+	Disposition ffDisposition     `json:"disposition"`
+	Tags        map[string]string `json:"tags"`
+}
+
+type ffDisposition struct {
+	Default int `json:"default"`
+	Forced  int `json:"forced"`
+}
+
+type mkvTrack struct {
+	Index    int    `json:"index"`
+	Codec    string `json:"codec"`
+	Language string `json:"language,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Default  bool   `json:"default"`
+	Forced   bool   `json:"forced,omitempty"`
+}
+
+type mkvProbeResponse struct {
+	Video  mkvTrack   `json:"video"`
+	Audio  []mkvTrack `json:"audio"`
+	Subs   []mkvTrack `json:"subs"`
+	Source string     `json:"source"`
+}
+
 func main() {
 	var dirs multiStringFlag
 	var addr string
@@ -190,6 +223,9 @@ func main() {
 	mux.HandleFunc("/api/list", a.withAuth(a.handleList))
 	mux.HandleFunc("/api/file", a.withAuth(a.handleFile))
 	mux.HandleFunc("/api/thumb", a.withAuth(a.handleThumb))
+	mux.HandleFunc("/api/mkv/probe", a.withAuth(a.handleMKVProbe))
+	mux.HandleFunc("/api/mkv/play", a.withAuth(a.handleMKVPlay))
+	mux.HandleFunc("/api/mkv/sub", a.withAuth(a.handleMKVSub))
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("web"))))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -527,6 +563,203 @@ func (a *app) handleThumb(w http.ResponseWriter, r *http.Request) {
 	serveThumbFile(w, r, cachePath)
 }
 
+func (a *app) handleMKVProbe(w http.ResponseWriter, r *http.Request) {
+	root, rel, real, err := a.resolveRequestPath(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	_ = root
+
+	if strings.ToLower(filepath.Ext(real)) != ".mkv" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "not an mkv file"})
+		return
+	}
+	st, err := os.Stat(real)
+	if err != nil || st.IsDir() {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
+
+	probe, err := probeMKV(real)
+	if err != nil {
+		log.Printf("mkv probe failed rel=%q real=%q err=%v", rel, real, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "probe failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, probe)
+}
+
+func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
+	root, rel, real, err := a.resolveRequestPath(r)
+	if err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if strings.ToLower(filepath.Ext(real)) != ".mkv" {
+		http.Error(w, "not an mkv file", http.StatusBadRequest)
+		return
+	}
+	st, err := os.Stat(real)
+	if err != nil || st.IsDir() {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	a.activeFileStream.Add(1)
+	defer a.activeFileStream.Add(-1)
+
+	probe, err := probeMKV(real)
+	if err != nil {
+		log.Printf("mkv probe failed rel=%q real=%q err=%v", rel, real, err)
+		http.Error(w, "probe failed", http.StatusInternalServerError)
+		return
+	}
+	audioIndex, err := selectAudioIndex(r, probe)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	videoIndex := probe.Video.Index
+	audioCodec := codecForIndex(probe.Audio, audioIndex)
+	copyAudio := isMP4CopyAudioCodec(audioCodec)
+
+	h := sha1.New()
+	io.WriteString(h, real)
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.FormatInt(st.ModTime().UnixNano(), 10))
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.FormatInt(st.Size(), 10))
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.Itoa(videoIndex))
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.Itoa(audioIndex))
+	io.WriteString(h, "|")
+	if copyAudio {
+		io.WriteString(h, "copy")
+	} else {
+		io.WriteString(h, "aac")
+	}
+	cachePath := filepath.Join(a.histDir, "mkv", hex.EncodeToString(h.Sum(nil))+".mp4")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		http.Error(w, "cache error", http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := os.Stat(cachePath); err != nil {
+		key := "mkv-play:" + cachePath
+		lock := a.lockFor(key)
+		lock.Lock()
+		if _, statErr := os.Stat(cachePath); statErr != nil {
+			if err := a.generateMKVPlayAsset(real, cachePath, videoIndex, audioIndex, copyAudio); err != nil {
+				lock.Unlock()
+				log.Printf("mkv play generate failed rel=%q real=%q err=%v", rel, real, err)
+				http.Error(w, "playback generation failed", http.StatusInternalServerError)
+				return
+			}
+		}
+		lock.Unlock()
+	}
+
+	out, err := os.Open(cachePath)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	defer out.Close()
+	outInfo, err := out.Stat()
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp4")
+	http.ServeContent(w, r, filepath.Base(cachePath), outInfo.ModTime(), out)
+	_ = root
+}
+
+func (a *app) handleMKVSub(w http.ResponseWriter, r *http.Request) {
+	_, rel, real, err := a.resolveRequestPath(r)
+	if err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if strings.ToLower(filepath.Ext(real)) != ".mkv" {
+		http.Error(w, "not an mkv file", http.StatusBadRequest)
+		return
+	}
+	st, err := os.Stat(real)
+	if err != nil || st.IsDir() {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	a.activeFileStream.Add(1)
+	defer a.activeFileStream.Add(-1)
+
+	probe, err := probeMKV(real)
+	if err != nil {
+		log.Printf("mkv probe failed rel=%q real=%q err=%v", rel, real, err)
+		http.Error(w, "probe failed", http.StatusInternalServerError)
+		return
+	}
+	subIndex, err := selectSubIndex(r, probe)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	h := sha1.New()
+	io.WriteString(h, real)
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.FormatInt(st.ModTime().UnixNano(), 10))
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.FormatInt(st.Size(), 10))
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.Itoa(subIndex))
+	cachePath := filepath.Join(a.histDir, "mkv", hex.EncodeToString(h.Sum(nil))+".vtt")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		http.Error(w, "cache error", http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := os.Stat(cachePath); err != nil {
+		key := "mkv-sub:" + cachePath
+		lock := a.lockFor(key)
+		lock.Lock()
+		if _, statErr := os.Stat(cachePath); statErr != nil {
+			if err := generateMKVSubtitleAsset(real, cachePath, subIndex); err != nil {
+				lock.Unlock()
+				log.Printf("mkv subtitle generate failed rel=%q real=%q err=%v", rel, real, err)
+				http.Error(w, "subtitle generation failed", http.StatusInternalServerError)
+				return
+			}
+		}
+		lock.Unlock()
+	}
+
+	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFile(w, r, cachePath)
+}
+
+func (a *app) resolveRequestPath(r *http.Request) (rootMount, string, string, error) {
+	rootID, err := strconv.Atoi(r.URL.Query().Get("root"))
+	if err != nil {
+		return rootMount{}, "", "", errors.New("invalid root")
+	}
+	root, ok := a.getRoot(rootID)
+	if !ok {
+		return rootMount{}, "", "", errors.New("root not found")
+	}
+	rel, err := cleanRel(r.URL.Query().Get("path"))
+	if err != nil {
+		return rootMount{}, "", "", errors.New("invalid path")
+	}
+	_, real, err := resolveExisting(root, rel)
+	if err != nil {
+		return rootMount{}, "", "", errors.New("not found")
+	}
+	return root, rel, real, nil
+}
+
 func (a *app) acquireThumbSlot(ctx context.Context) error {
 	for {
 		if a.activeFileStream.Load() > 0 {
@@ -555,6 +788,173 @@ func (a *app) releaseThumbSlot() {
 	case <-a.thumbSem:
 	default:
 	}
+}
+
+func probeMKV(src string) (mkvProbeResponse, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-show_streams", "-of", "json", src)
+	out, err := cmd.Output()
+	if err != nil {
+		return mkvProbeResponse{}, err
+	}
+	var probe ffprobeOutput
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return mkvProbeResponse{}, err
+	}
+
+	resp := mkvProbeResponse{
+		Audio:  make([]mkvTrack, 0, 4),
+		Subs:   make([]mkvTrack, 0, 4),
+		Source: filepath.Base(src),
+	}
+	for _, s := range probe.Streams {
+		track := mkvTrack{
+			Index:    s.Index,
+			Codec:    s.CodecName,
+			Language: streamTag(s.Tags, "language"),
+			Title:    streamTag(s.Tags, "title"),
+			Default:  s.Disposition.Default == 1,
+			Forced:   s.Disposition.Forced == 1,
+		}
+		switch s.CodecType {
+		case "video":
+			if resp.Video.Index == 0 && resp.Video.Codec == "" {
+				resp.Video = track
+			}
+		case "audio":
+			resp.Audio = append(resp.Audio, track)
+		case "subtitle":
+			resp.Subs = append(resp.Subs, track)
+		}
+	}
+
+	if resp.Video.Codec == "" {
+		return mkvProbeResponse{}, errors.New("no video stream")
+	}
+	if len(resp.Audio) == 0 {
+		return mkvProbeResponse{}, errors.New("no audio stream")
+	}
+	return resp, nil
+}
+
+func streamTag(tags map[string]string, key string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	for k, v := range tags {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
+}
+
+func selectAudioIndex(r *http.Request, probe mkvProbeResponse) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("audio"))
+	if raw != "" {
+		idx, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, errors.New("invalid audio index")
+		}
+		for _, a := range probe.Audio {
+			if a.Index == idx {
+				return idx, nil
+			}
+		}
+		return 0, errors.New("audio track not found")
+	}
+	for _, a := range probe.Audio {
+		if a.Default {
+			return a.Index, nil
+		}
+	}
+	return probe.Audio[0].Index, nil
+}
+
+func selectSubIndex(r *http.Request, probe mkvProbeResponse) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("sub"))
+	if raw == "" {
+		return 0, errors.New("missing sub index")
+	}
+	idx, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, errors.New("invalid sub index")
+	}
+	for _, s := range probe.Subs {
+		if s.Index == idx {
+			return idx, nil
+		}
+	}
+	return 0, errors.New("subtitle track not found")
+}
+
+func codecForIndex(tracks []mkvTrack, index int) string {
+	for _, t := range tracks {
+		if t.Index == index {
+			return strings.ToLower(t.Codec)
+		}
+	}
+	return ""
+}
+
+func isMP4CopyAudioCodec(codec string) bool {
+	switch strings.ToLower(codec) {
+	case "aac", "mp3", "alac":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *app) generateMKVPlayAsset(src, dst string, videoIndex, audioIndex int, copyAudio bool) error {
+	tmp := dst + ".tmp.mp4"
+	args := []string{
+		"-hide_banner",
+		"-loglevel", "error",
+		"-i", src,
+		"-map", fmt.Sprintf("0:%d", videoIndex),
+		"-map", fmt.Sprintf("0:%d", audioIndex),
+		"-map", "-0:s",
+		"-map", "-0:d",
+		"-c:v", "copy",
+	}
+	if copyAudio {
+		args = append(args, "-c:a", "copy")
+	} else {
+		args = append(args, "-c:a", "aac", "-b:a", "192k")
+	}
+	args = append(args, "-movflags", "+faststart", "-f", "mp4", "-y", tmp)
+
+	cmd := exec.Command("ffmpeg", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if len(out) > 0 {
+			return fmt.Errorf("ffmpeg: %s", strings.TrimSpace(string(out)))
+		}
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+func generateMKVSubtitleAsset(src, dst string, subIndex int) error {
+	tmp := dst + ".tmp.vtt"
+	cmd := exec.Command(
+		"ffmpeg",
+		"-hide_banner",
+		"-loglevel", "error",
+		"-i", src,
+		"-map", fmt.Sprintf("0:%d", subIndex),
+		"-c:s", "webvtt",
+		"-f", "webvtt",
+		"-y", tmp,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if len(out) > 0 {
+			return fmt.Errorf("ffmpeg: %s", strings.TrimSpace(string(out)))
+		}
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 func (a *app) getRoot(id int) (rootMount, bool) {
@@ -660,7 +1060,7 @@ func generateImageThumb(src, dst string, maxSize int) error {
 
 	tw, th := fitInside(w, h, maxSize)
 	dstImg := image.NewRGBA(image.Rect(0, 0, tw, th))
-	draw.CatmullRom.Scale(dstImg, dstImg.Bounds(), img, b, draw.Over, nil)
+	draw.ApproxBiLinear.Scale(dstImg, dstImg.Bounds(), img, b, draw.Over, nil)
 
 	out, err := os.Create(dst)
 	if err != nil {

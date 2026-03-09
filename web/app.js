@@ -36,6 +36,13 @@ const viewerBody = document.getElementById("viewerBody");
 const viewerTitle = document.getElementById("viewerTitle");
 const viewerClose = document.getElementById("viewerClose");
 let thumbObserver = null;
+const thumbLoader = {
+  queue: [],
+  inflight: 0,
+  maxConcurrent: 2,
+  active: new Map(),
+  pauseUntil: 0,
+};
 
 const folderSVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>';
@@ -158,6 +165,21 @@ function fileURL(entryPath) {
   return `/api/file?${q.toString()}`;
 }
 
+function mkvProbeURL(entryPath) {
+  const q = new URLSearchParams({ root: String(state.rootId), path: entryPath });
+  return `/api/mkv/probe?${q.toString()}`;
+}
+
+function mkvPlayURL(entryPath, audioIndex) {
+  const q = new URLSearchParams({ root: String(state.rootId), path: entryPath, audio: String(audioIndex) });
+  return `/api/mkv/play?${q.toString()}`;
+}
+
+function mkvSubURL(entryPath, subIndex) {
+  const q = new URLSearchParams({ root: String(state.rootId), path: entryPath, sub: String(subIndex) });
+  return `/api/mkv/sub?${q.toString()}`;
+}
+
 function thumbURL(entryPath, size) {
   const q = new URLSearchParams({ root: String(state.rootId), path: entryPath, size: String(size) });
   return `/api/thumb?${q.toString()}`;
@@ -180,6 +202,11 @@ function closeViewer() {
 }
 
 function openViewer(entry) {
+  if (entry.name.toLowerCase().endsWith(".mkv")) {
+    openMKVViewer(entry);
+    return;
+  }
+
   const src = fileURL(entry.path);
   const mime = entry.mime || "";
   viewerTitle.textContent = entry.name;
@@ -212,6 +239,125 @@ function openViewer(entry) {
   viewerModal.classList.remove("hidden");
 }
 
+function pauseThumbLoading(ms) {
+  thumbLoader.pauseUntil = Math.max(thumbLoader.pauseUntil, Date.now() + ms);
+  for (const [, ctrl] of thumbLoader.active) {
+    ctrl.abort();
+  }
+}
+
+function trackLabel(track) {
+  const parts = [];
+  if (track.language) parts.push(track.language);
+  if (track.title) parts.push(track.title);
+  if (!track.language && !track.title) parts.push(`track ${track.index}`);
+  if (track.default) parts.push("default");
+  if (track.forced) parts.push("forced");
+  return `${parts.join(" - ")} [${track.codec}]`;
+}
+
+async function openMKVViewer(entry) {
+  viewerTitle.textContent = `${entry.name} (mkv)`;
+  clearViewer();
+  viewerModal.classList.remove("hidden");
+  viewerBody.textContent = "Loading tracks...";
+
+  try {
+    const probeRes = await api(mkvProbeURL(entry.path));
+    if (!probeRes.ok) {
+      throw new Error(`probe failed: ${probeRes.status}`);
+    }
+    const probe = await probeRes.json();
+    const audioTracks = probe.audio || [];
+    const subTracks = probe.subs || [];
+    if (audioTracks.length === 0) {
+      throw new Error("No audio tracks found");
+    }
+
+    viewerBody.innerHTML = "";
+    const controls = document.createElement("div");
+    controls.className = "mkvControls";
+
+    const audioLabel = document.createElement("label");
+    audioLabel.textContent = "Audio";
+    const audioSelect = document.createElement("select");
+    for (const a of audioTracks) {
+      const opt = document.createElement("option");
+      opt.value = String(a.index);
+      opt.textContent = trackLabel(a);
+      audioSelect.appendChild(opt);
+      if (a.default) {
+        audioSelect.value = String(a.index);
+      }
+    }
+    if (!audioSelect.value && audioTracks[0]) {
+      audioSelect.value = String(audioTracks[0].index);
+    }
+    audioLabel.appendChild(audioSelect);
+
+    const subLabel = document.createElement("label");
+    subLabel.textContent = "Subtitles";
+    const subSelect = document.createElement("select");
+    const offOpt = document.createElement("option");
+    offOpt.value = "";
+    offOpt.textContent = "Off";
+    subSelect.appendChild(offOpt);
+    for (const s of subTracks) {
+      const opt = document.createElement("option");
+      opt.value = String(s.index);
+      opt.textContent = trackLabel(s);
+      subSelect.appendChild(opt);
+      if ((s.default || s.forced) && !subSelect.value) {
+        subSelect.value = String(s.index);
+      }
+    }
+    subLabel.appendChild(subSelect);
+
+    const video = document.createElement("video");
+    video.controls = true;
+    video.autoplay = true;
+    video.preload = "metadata";
+    video.className = "mkvVideo";
+
+    const setPlayback = () => {
+      const audioIndex = audioSelect.value;
+      const subIndex = subSelect.value;
+      video.src = mkvPlayURL(entry.path, audioIndex);
+      for (const t of [...video.querySelectorAll("track")]) {
+        t.remove();
+      }
+      if (subIndex !== "") {
+        const track = document.createElement("track");
+        track.kind = "subtitles";
+        track.label = "Selected subtitle";
+        track.srclang = "und";
+        track.src = mkvSubURL(entry.path, subIndex);
+        track.default = true;
+        video.appendChild(track);
+      }
+      video.load();
+    };
+
+    audioSelect.addEventListener("change", () => {
+      pauseThumbLoading(1500);
+      setPlayback();
+    });
+    subSelect.addEventListener("change", () => {
+      pauseThumbLoading(1500);
+      setPlayback();
+    });
+
+    controls.appendChild(audioLabel);
+    controls.appendChild(subLabel);
+    viewerBody.appendChild(controls);
+    viewerBody.appendChild(video);
+    pauseThumbLoading(2000);
+    setPlayback();
+  } catch (err) {
+    viewerBody.textContent = `Failed to load MKV tracks: ${err.message || err}`;
+  }
+}
+
 function setupEntryClick(link, entry) {
   link.href = entry.isDir ? browseURL(state.rootId, entry.path) : fileURL(entry.path);
   link.addEventListener("click", (e) => {
@@ -223,6 +369,7 @@ function setupEntryClick(link, entry) {
       state.path = entry.path;
       loadList({ pushURL: true });
     } else {
+      pauseThumbLoading(2000);
       openViewer(entry);
     }
   });
@@ -238,9 +385,7 @@ function ensureThumbObserver() {
         if (!ent.isIntersecting) continue;
         const img = ent.target;
         const src = img.dataset.src;
-        if (src && !img.src) {
-          img.src = src;
-        }
+        if (src && !img.src) enqueueThumbRequest(img);
         thumbObserver.unobserve(img);
       }
     },
@@ -259,12 +404,84 @@ function queueThumbLoad(img, src) {
   img.decoding = "async";
   img.classList.remove("hidden");
 
+  img.dataset.thumbState = "idle";
   if (!("IntersectionObserver" in window)) {
-    img.src = src;
+    enqueueThumbRequest(img);
     return;
   }
   ensureThumbObserver();
   thumbObserver.observe(img);
+}
+
+function enqueueThumbRequest(img) {
+  if (!img || !img.isConnected) return;
+  const stateName = img.dataset.thumbState || "idle";
+  if (stateName === "queued" || stateName === "loading" || stateName === "done") {
+    return;
+  }
+  img.dataset.thumbState = "queued";
+  thumbLoader.queue.push(img);
+  pumpThumbQueue();
+}
+
+function pumpThumbQueue() {
+  if (Date.now() < thumbLoader.pauseUntil) {
+    setTimeout(pumpThumbQueue, 120);
+    return;
+  }
+
+  while (thumbLoader.inflight < thumbLoader.maxConcurrent && thumbLoader.queue.length > 0) {
+    const img = thumbLoader.queue.shift();
+    if (!img || !img.isConnected || !img.dataset.src) {
+      continue;
+    }
+    if (img.dataset.thumbState === "done") {
+      continue;
+    }
+    img.dataset.thumbState = "loading";
+    thumbLoader.inflight += 1;
+    const ctrl = new AbortController();
+    thumbLoader.active.set(img, ctrl);
+    const src = img.dataset.src;
+
+    fetch(src, {
+      credentials: "include",
+      signal: ctrl.signal,
+      cache: "force-cache",
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`thumb ${res.status}`);
+        return res.blob();
+      })
+      .then((blob) => {
+        if (!img.isConnected) return;
+        const objectURL = URL.createObjectURL(blob);
+        img.src = objectURL;
+        img.dataset.thumbState = "done";
+        img.addEventListener(
+          "load",
+          () => {
+            URL.revokeObjectURL(objectURL);
+          },
+          { once: true },
+        );
+      })
+      .catch((err) => {
+        if (err && err.name === "AbortError") {
+          if (img.isConnected) {
+            img.dataset.thumbState = "idle";
+          }
+          return;
+        }
+        img.classList.add("hidden");
+        img.dataset.thumbState = "failed";
+      })
+      .finally(() => {
+        thumbLoader.active.delete(img);
+        thumbLoader.inflight = Math.max(0, thumbLoader.inflight - 1);
+        pumpThumbQueue();
+      });
+  }
 }
 
 function renderList(entries) {

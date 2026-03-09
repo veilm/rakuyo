@@ -355,6 +355,27 @@ body[data-theme="dark"] .gfolder {
   width: min(700px, 92vw);
 }
 
+.mkvControls {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+  color: var(--text);
+}
+
+.mkvControls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.82rem;
+}
+
+.mkvVideo {
+  max-width: 100%;
+  max-height: 72vh;
+}
+
 @media (max-width: 840px) {
   .topbar {
     flex-direction: column;
