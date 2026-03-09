@@ -9,6 +9,10 @@
   --surface-2: #f1ece4;
   --control-bg: #fcf8f1;
   --control-text: #2b241d;
+  --viewer-card: #fffaf2;
+  --viewer-border: #d4c6b2;
+  --viewer-text: #2b241d;
+  --viewer-backdrop: rgba(25, 17, 11, 0.58);
 }
 
 * {
@@ -20,6 +24,7 @@ body {
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
   color: var(--text);
   background: radial-gradient(circle at top left, #faf7f3 0, #f1ece4 40%, #e8e1d6 100%);
+  color-scheme: light;
 }
 
 body[data-theme="dark"] {
@@ -33,7 +38,12 @@ body[data-theme="dark"] {
   --surface-2: #241c16;
   --control-bg: #2a2119;
   --control-text: #f3e8d8;
+  --viewer-card: #16100d;
+  --viewer-border: #3d2f22;
+  --viewer-text: #f3e8d8;
+  --viewer-backdrop: rgba(14, 9, 7, 0.75);
   background: radial-gradient(circle at top left, #2a1f17 0, #140f0c 45%, #080605 100%);
+  color-scheme: dark;
 }
 
 .topbar {
@@ -81,6 +91,21 @@ button {
   cursor: pointer;
 }
 
+button:disabled,
+select:disabled,
+input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .gridSizeCtl {
   display: inline-flex;
   align-items: center;
@@ -106,6 +131,7 @@ input:hover {
   width: 110px;
   padding: 0;
   border: 0;
+  accent-color: var(--accent);
 }
 
 #gridSizeValue {
@@ -277,6 +303,11 @@ body[data-theme="dark"] .gfolder {
   height: 100%;
 }
 
+.glink:hover .gcard {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
 .gup {
   border: 1px dashed var(--line);
   border-radius: 10px;
@@ -304,7 +335,7 @@ body[data-theme="dark"] .gfolder {
 .viewerBackdrop {
   position: absolute;
   inset: 0;
-  background: rgba(14, 9, 7, 0.75);
+  background: var(--viewer-backdrop);
 }
 
 .viewerCard {
@@ -312,8 +343,8 @@ body[data-theme="dark"] .gfolder {
   z-index: 1;
   width: min(1100px, 94vw);
   max-height: 88vh;
-  background: #16100d;
-  border: 1px solid #3d2f22;
+  background: var(--viewer-card);
+  border: 1px solid var(--viewer-border);
   border-radius: 12px;
   display: flex;
   flex-direction: column;
@@ -326,8 +357,8 @@ body[data-theme="dark"] .gfolder {
   gap: 1rem;
   align-items: center;
   padding: 0.55rem 0.8rem;
-  border-bottom: 1px solid #3d2f22;
-  color: #f3e8d8;
+  border-bottom: 1px solid var(--viewer-border);
+  color: var(--viewer-text);
 }
 
 #viewerTitle {
@@ -342,6 +373,7 @@ body[data-theme="dark"] .gfolder {
   overflow: auto;
   display: grid;
   place-items: center;
+  color: var(--viewer-text);
 }
 
 .viewerBody img,
@@ -361,7 +393,7 @@ body[data-theme="dark"] .gfolder {
   flex-wrap: wrap;
   gap: 0.6rem;
   margin-bottom: 0.6rem;
-  color: var(--text);
+  color: var(--viewer-text);
 }
 
 .mkvControls label {
