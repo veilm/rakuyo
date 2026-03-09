@@ -327,10 +327,11 @@ async function openMKVViewer(entry) {
         t.remove();
       }
       if (subIndex !== "") {
+        const selectedSub = subTracks.find((s) => String(s.index) === subIndex);
         const track = document.createElement("track");
         track.kind = "subtitles";
-        track.label = "Selected subtitle";
-        track.srclang = "und";
+        track.label = selectedSub ? trackLabel(selectedSub) : "Selected subtitle";
+        track.srclang = selectedSub && selectedSub.language ? selectedSub.language : "und";
         track.src = mkvSubURL(entry.path, subIndex);
         track.default = true;
         video.appendChild(track);
@@ -382,11 +383,18 @@ function ensureThumbObserver() {
   thumbObserver = new IntersectionObserver(
     (obsEntries) => {
       for (const ent of obsEntries) {
-        if (!ent.isIntersecting) continue;
         const img = ent.target;
-        const src = img.dataset.src;
-        if (src && !img.src) enqueueThumbRequest(img);
-        thumbObserver.unobserve(img);
+        if (!img || !img.isConnected) {
+          thumbObserver.unobserve(img);
+          continue;
+        }
+        if (img.dataset.thumbState === "done" || img.dataset.thumbState === "failed") {
+          thumbObserver.unobserve(img);
+          continue;
+        }
+        if (ent.isIntersecting && img.dataset.src && !img.src) {
+          enqueueThumbRequest(img);
+        }
       }
     },
     {
@@ -395,6 +403,12 @@ function ensureThumbObserver() {
       threshold: 0.01,
     },
   );
+}
+
+function isNearViewport(el, marginPx = 300) {
+  if (!el || !el.isConnected) return false;
+  const r = el.getBoundingClientRect();
+  return r.bottom >= -marginPx && r.top <= window.innerHeight + marginPx;
 }
 
 function queueThumbLoad(img, src) {
@@ -433,6 +447,10 @@ function pumpThumbQueue() {
   while (thumbLoader.inflight < thumbLoader.maxConcurrent && thumbLoader.queue.length > 0) {
     const img = thumbLoader.queue.shift();
     if (!img || !img.isConnected || !img.dataset.src) {
+      continue;
+    }
+    if (!isNearViewport(img, 360)) {
+      img.dataset.thumbState = "idle";
       continue;
     }
     if (img.dataset.thumbState === "done") {
