@@ -110,6 +110,8 @@ type ffprobeOutput struct {
 type ffprobeStream struct {
 	Index       int               `json:"index"`
 	CodecName   string            `json:"codec_name"`
+	Profile     string            `json:"profile"`
+	PixFmt      string            `json:"pix_fmt"`
 	CodecType   string            `json:"codec_type"`
 	Disposition ffDisposition     `json:"disposition"`
 	Tags        map[string]string `json:"tags"`
@@ -123,6 +125,8 @@ type ffDisposition struct {
 type mkvTrack struct {
 	Index    int    `json:"index"`
 	Codec    string `json:"codec"`
+	Profile  string `json:"profile,omitempty"`
+	PixFmt   string `json:"pixFmt,omitempty"`
 	Language string `json:"language,omitempty"`
 	Title    string `json:"title,omitempty"`
 	Default  bool   `json:"default"`
@@ -620,10 +624,13 @@ func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	videoIndex := probe.Video.Index
-	videoCodec := strings.ToLower(probe.Video.Codec)
 	audioCodec := codecForIndex(probe.Audio, audioIndex)
 	copyAudio := isMP4CopyAudioCodec(audioCodec)
-	copyVideo := isMP4CopyVideoCodec(videoCodec)
+	copyVideo := isMP4CopyVideoTrack(probe.Video)
+	if !copyVideo {
+		http.Error(w, "video codec not supported for remux playback", http.StatusBadRequest)
+		return
+	}
 
 	h := sha1.New()
 	io.WriteString(h, real)
@@ -641,12 +648,7 @@ func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
 	} else {
 		io.WriteString(h, "aac")
 	}
-	io.WriteString(h, "|")
-	if copyVideo {
-		io.WriteString(h, "vcopy")
-	} else {
-		io.WriteString(h, "vx264")
-	}
+	io.WriteString(h, "|vcopy")
 	cachePath := filepath.Join(a.histDir, "mkv", hex.EncodeToString(h.Sum(nil))+".mp4")
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 		http.Error(w, "cache error", http.StatusInternalServerError)
@@ -862,6 +864,8 @@ func probeMKV(src string) (mkvProbeResponse, error) {
 		track := mkvTrack{
 			Index:    s.Index,
 			Codec:    s.CodecName,
+			Profile:  s.Profile,
+			PixFmt:   s.PixFmt,
 			Language: streamTag(s.Tags, "language"),
 			Title:    streamTag(s.Tags, "title"),
 			Default:  s.Disposition.Default == 1,
@@ -957,9 +961,23 @@ func isMP4CopyAudioCodec(codec string) bool {
 	}
 }
 
-func isMP4CopyVideoCodec(codec string) bool {
-	switch strings.ToLower(codec) {
-	case "h264":
+func isMP4CopyVideoTrack(track mkvTrack) bool {
+	codec := strings.ToLower(track.Codec)
+	if codec != "h264" && codec != "hevc" {
+		return false
+	}
+	if codec == "hevc" {
+		return true
+	}
+	if track.PixFmt != "" && !strings.EqualFold(track.PixFmt, "yuv420p") {
+		return false
+	}
+	prof := strings.ToLower(track.Profile)
+	if prof == "" {
+		return true
+	}
+	switch prof {
+	case "baseline", "main", "high", "constrained baseline":
 		return true
 	default:
 		return false
@@ -986,11 +1004,10 @@ func (a *app) generateMKVPlayAsset(ctx context.Context, src, dst string, videoIn
 		"-map", "-0:s",
 		"-map", "-0:d",
 	}
-	if copyVideo {
-		args = append(args, "-c:v", "copy")
-	} else {
-		args = append(args, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p")
+	if !copyVideo {
+		return errors.New("video transcoding disabled")
 	}
+	args = append(args, "-c:v", "copy")
 	if copyAudio {
 		args = append(args, "-c:a", "copy")
 	} else {

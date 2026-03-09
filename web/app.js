@@ -37,10 +37,6 @@ const viewerTitle = document.getElementById("viewerTitle");
 const viewerClose = document.getElementById("viewerClose");
 let thumbObserver = null;
 const thumbLoader = {
-  queue: [],
-  inflight: 0,
-  maxConcurrent: 2,
-  active: new Map(),
   pauseUntil: 0,
 };
 
@@ -241,9 +237,6 @@ function openViewer(entry) {
 
 function pauseThumbLoading(ms) {
   thumbLoader.pauseUntil = Math.max(thumbLoader.pauseUntil, Date.now() + ms);
-  for (const [, ctrl] of thumbLoader.active) {
-    ctrl.abort();
-  }
 }
 
 function trackLabel(track) {
@@ -254,6 +247,37 @@ function trackLabel(track) {
   if (track.default) parts.push("default");
   if (track.forced) parts.push("forced");
   return `${parts.join(" - ")} [${track.codec}]`;
+}
+
+function canPlayMP4Codec(videoCodec) {
+  const codec = (videoCodec || "").toLowerCase();
+  const v = document.createElement("video");
+  if (codec === "h264") {
+    return v.canPlayType('video/mp4; codecs="avc1.42E01E,mp4a.40.2"') !== "";
+  }
+  if (codec === "hevc" || codec === "h265") {
+    return v.canPlayType('video/mp4; codecs="hvc1,mp4a.40.2"') !== "";
+  }
+  return false;
+}
+
+function showMKVUnsupported(entry, reason) {
+  viewerBody.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "mkvControls";
+
+  const msg = document.createElement("div");
+  msg.textContent = `This MKV is not supported for browser playback here (${reason}).`;
+  wrap.appendChild(msg);
+
+  const raw = document.createElement("a");
+  raw.href = fileURL(entry.path);
+  raw.target = "_blank";
+  raw.rel = "noopener";
+  raw.textContent = "Try opening raw file anyway";
+  wrap.appendChild(raw);
+
+  viewerBody.appendChild(wrap);
 }
 
 async function openMKVViewer(entry) {
@@ -268,10 +292,15 @@ async function openMKVViewer(entry) {
       throw new Error(`probe failed: ${probeRes.status}`);
     }
     const probe = await probeRes.json();
+    const videoTrack = probe.video || {};
     const audioTracks = probe.audio || [];
     const subTracks = probe.subs || [];
     if (audioTracks.length === 0) {
       throw new Error("No audio tracks found");
+    }
+    if (!canPlayMP4Codec(videoTrack.codec)) {
+      showMKVUnsupported(entry, `video codec ${videoTrack.codec || "unknown"}`);
+      return;
     }
 
     viewerBody.innerHTML = "";
@@ -430,76 +459,26 @@ function queueThumbLoad(img, src) {
 function enqueueThumbRequest(img) {
   if (!img || !img.isConnected) return;
   const stateName = img.dataset.thumbState || "idle";
-  if (stateName === "queued" || stateName === "loading" || stateName === "done") {
+  if (stateName === "loading" || stateName === "done" || stateName === "failed") {
     return;
   }
-  img.dataset.thumbState = "queued";
-  thumbLoader.queue.push(img);
-  pumpThumbQueue();
-}
-
-function pumpThumbQueue() {
   if (Date.now() < thumbLoader.pauseUntil) {
-    setTimeout(pumpThumbQueue, 120);
+    setTimeout(() => enqueueThumbRequest(img), 120);
+    return;
+  }
+  if (!isNearViewport(img, 360)) {
     return;
   }
 
-  while (thumbLoader.inflight < thumbLoader.maxConcurrent && thumbLoader.queue.length > 0) {
-    const img = thumbLoader.queue.shift();
-    if (!img || !img.isConnected || !img.dataset.src) {
-      continue;
-    }
-    if (!isNearViewport(img, 360)) {
-      img.dataset.thumbState = "idle";
-      continue;
-    }
-    if (img.dataset.thumbState === "done") {
-      continue;
-    }
-    img.dataset.thumbState = "loading";
-    thumbLoader.inflight += 1;
-    const ctrl = new AbortController();
-    thumbLoader.active.set(img, ctrl);
-    const src = img.dataset.src;
-
-    fetch(src, {
-      credentials: "include",
-      signal: ctrl.signal,
-      cache: "force-cache",
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`thumb ${res.status}`);
-        return res.blob();
-      })
-      .then((blob) => {
-        if (!img.isConnected) return;
-        const objectURL = URL.createObjectURL(blob);
-        img.src = objectURL;
-        img.dataset.thumbState = "done";
-        img.addEventListener(
-          "load",
-          () => {
-            URL.revokeObjectURL(objectURL);
-          },
-          { once: true },
-        );
-      })
-      .catch((err) => {
-        if (err && err.name === "AbortError") {
-          if (img.isConnected) {
-            img.dataset.thumbState = "idle";
-          }
-          return;
-        }
-        img.classList.add("hidden");
-        img.dataset.thumbState = "failed";
-      })
-      .finally(() => {
-        thumbLoader.active.delete(img);
-        thumbLoader.inflight = Math.max(0, thumbLoader.inflight - 1);
-        pumpThumbQueue();
-      });
-  }
+  img.dataset.thumbState = "loading";
+  img.onload = () => {
+    img.dataset.thumbState = "done";
+  };
+  img.onerror = () => {
+    img.classList.add("hidden");
+    img.dataset.thumbState = "failed";
+  };
+  img.src = img.dataset.src;
 }
 
 function renderList(entries) {
