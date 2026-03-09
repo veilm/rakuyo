@@ -261,25 +261,6 @@ function canPlayMP4Codec(videoCodec) {
   return false;
 }
 
-function showMKVUnsupported(entry, reason) {
-  viewerBody.innerHTML = "";
-  const wrap = document.createElement("div");
-  wrap.className = "mkvControls";
-
-  const msg = document.createElement("div");
-  msg.textContent = `This MKV is not supported for browser playback here (${reason}).`;
-  wrap.appendChild(msg);
-
-  const raw = document.createElement("a");
-  raw.href = fileURL(entry.path);
-  raw.target = "_blank";
-  raw.rel = "noopener";
-  raw.textContent = "Try opening raw file anyway";
-  wrap.appendChild(raw);
-
-  viewerBody.appendChild(wrap);
-}
-
 async function openMKVViewer(entry) {
   viewerTitle.textContent = `${entry.name} (mkv)`;
   clearViewer();
@@ -298,10 +279,7 @@ async function openMKVViewer(entry) {
     if (audioTracks.length === 0) {
       throw new Error("No audio tracks found");
     }
-    if (!canPlayMP4Codec(videoTrack.codec)) {
-      showMKVUnsupported(entry, `video codec ${videoTrack.codec || "unknown"}`);
-      return;
-    }
+    const remuxLikelyPlayable = canPlayMP4Codec(videoTrack.codec);
 
     viewerBody.innerHTML = "";
     const controls = document.createElement("div");
@@ -342,6 +320,24 @@ async function openMKVViewer(entry) {
     }
     subLabel.appendChild(subSelect);
 
+    const modeLabel = document.createElement("label");
+    modeLabel.textContent = "Playback";
+    const modeSelect = document.createElement("select");
+    const nativeOpt = document.createElement("option");
+    nativeOpt.value = "native";
+    nativeOpt.textContent = "Native MKV";
+    const remuxOpt = document.createElement("option");
+    remuxOpt.value = "remux";
+    remuxOpt.textContent = remuxLikelyPlayable ? "Remux MP4" : "Remux MP4 (May Fail)";
+    modeSelect.appendChild(nativeOpt);
+    modeSelect.appendChild(remuxOpt);
+    modeSelect.value = remuxLikelyPlayable ? "remux" : "native";
+    modeLabel.appendChild(modeSelect);
+
+    const hint = document.createElement("div");
+    hint.style.fontSize = "0.8rem";
+    hint.style.opacity = "0.85";
+
     const video = document.createElement("video");
     video.controls = true;
     video.autoplay = true;
@@ -351,7 +347,13 @@ async function openMKVViewer(entry) {
     const setPlayback = () => {
       const audioIndex = audioSelect.value;
       const subIndex = subSelect.value;
-      video.src = mkvPlayURL(entry.path, audioIndex);
+      const mode = modeSelect.value;
+      const useNative = mode === "native";
+      video.src = useNative ? fileURL(entry.path) : mkvPlayURL(entry.path, audioIndex);
+      audioSelect.disabled = useNative;
+      hint.textContent = useNative
+        ? "Native MKV mode: subtitle selection works, audio track selection depends on browser support."
+        : "Remux MP4 mode: selected audio track is applied server-side.";
       for (const t of [...video.querySelectorAll("track")]) {
         t.remove();
       }
@@ -376,10 +378,16 @@ async function openMKVViewer(entry) {
       pauseThumbLoading(1500);
       setPlayback();
     });
+    modeSelect.addEventListener("change", () => {
+      pauseThumbLoading(1500);
+      setPlayback();
+    });
 
     controls.appendChild(audioLabel);
     controls.appendChild(subLabel);
+    controls.appendChild(modeLabel);
     viewerBody.appendChild(controls);
+    viewerBody.appendChild(hint);
     viewerBody.appendChild(video);
     pauseThumbLoading(2000);
     setPlayback();
