@@ -14,7 +14,7 @@ Minimal remote file manager (Go backend + vanilla JS frontend).
 ## Requirements
 
 - Go 1.23+
-- `ffmpeg` (only needed for video thumbnails)
+- `ffmpeg` (needed for video thumbnails and browser remux playback)
 
 ## Run
 

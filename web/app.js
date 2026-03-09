@@ -166,6 +166,19 @@ function mkvProbeURL(entryPath) {
   return `/api/mkv/probe?${q.toString()}`;
 }
 
+function videoProbeURL(entryPath) {
+  const q = new URLSearchParams({ root: String(state.rootId), path: entryPath });
+  return `/api/video/probe?${q.toString()}`;
+}
+
+function videoPlayURL(entryPath, audioIndex) {
+  const q = new URLSearchParams({ root: String(state.rootId), path: entryPath });
+  if (audioIndex !== "" && audioIndex !== null && audioIndex !== undefined) {
+    q.set("audio", String(audioIndex));
+  }
+  return `/api/video/play?${q.toString()}`;
+}
+
 function mkvPlayURL(entryPath, audioIndex) {
   const q = new URLSearchParams({ root: String(state.rootId), path: entryPath, audio: String(audioIndex) });
   return `/api/mkv/play?${q.toString()}`;
@@ -203,6 +216,11 @@ function openViewer(entry) {
     return;
   }
 
+  if ((entry.mime || "").startsWith("video/")) {
+    openVideoViewer(entry);
+    return;
+  }
+
   const src = fileURL(entry.path);
   const mime = entry.mime || "";
   viewerTitle.textContent = entry.name;
@@ -212,12 +230,6 @@ function openViewer(entry) {
     img.src = src;
     img.alt = entry.name;
     viewerBody.appendChild(img);
-  } else if (mime.startsWith("video/")) {
-    const video = document.createElement("video");
-    video.src = src;
-    video.controls = true;
-    video.autoplay = true;
-    viewerBody.appendChild(video);
   } else if (mime.startsWith("audio/")) {
     const audio = document.createElement("audio");
     audio.src = src;
@@ -259,6 +271,140 @@ function canPlayMP4Codec(videoCodec) {
     return v.canPlayType('video/mp4; codecs="hvc1,mp4a.40.2"') !== "";
   }
   return false;
+}
+
+function fallbackVideoViewer(entry, message) {
+  viewerTitle.textContent = entry.name;
+  clearViewer();
+  const video = document.createElement("video");
+  video.src = fileURL(entry.path);
+  video.controls = true;
+  video.autoplay = true;
+  video.preload = "metadata";
+  viewerBody.appendChild(video);
+  if (message) {
+    const hint = document.createElement("div");
+    hint.style.fontSize = "0.8rem";
+    hint.style.opacity = "0.85";
+    hint.textContent = message;
+    viewerBody.appendChild(hint);
+  }
+  viewerModal.classList.remove("hidden");
+}
+
+async function openVideoViewer(entry) {
+  viewerTitle.textContent = entry.name;
+  clearViewer();
+  viewerModal.classList.remove("hidden");
+  viewerBody.textContent = "Inspecting video...";
+
+  try {
+    const probeRes = await api(videoProbeURL(entry.path));
+    if (!probeRes.ok) {
+      throw new Error(`probe failed: ${probeRes.status}`);
+    }
+    const probe = await probeRes.json();
+    const videoTrack = probe.video || {};
+    const audioTracks = probe.audio || [];
+    const remuxSupported = Boolean(probe.remuxSupported);
+    const remuxRecommended = Boolean(probe.remuxRecommended);
+    const nativeLikely = probe.nativeLikely !== false;
+    const formatLabel = probe.formatLongName || probe.formatName || "unknown container";
+    const remuxLikelyPlayable = remuxSupported && canPlayMP4Codec(videoTrack.codec);
+
+    viewerBody.innerHTML = "";
+    const controls = document.createElement("div");
+    controls.className = "mkvControls";
+
+    let audioSelect = null;
+    if (audioTracks.length > 0) {
+      const audioLabel = document.createElement("label");
+      audioLabel.textContent = "Audio";
+      audioSelect = document.createElement("select");
+      for (const a of audioTracks) {
+        const opt = document.createElement("option");
+        opt.value = String(a.index);
+        opt.textContent = trackLabel(a);
+        audioSelect.appendChild(opt);
+        if (a.default) {
+          audioSelect.value = String(a.index);
+        }
+      }
+      if (!audioSelect.value && audioTracks[0]) {
+        audioSelect.value = String(audioTracks[0].index);
+      }
+      audioLabel.appendChild(audioSelect);
+      controls.appendChild(audioLabel);
+    }
+
+    const modeLabel = document.createElement("label");
+    modeLabel.textContent = "Playback";
+    const modeSelect = document.createElement("select");
+    const nativeOpt = document.createElement("option");
+    nativeOpt.value = "native";
+    nativeOpt.textContent = "Native file";
+    modeSelect.appendChild(nativeOpt);
+    if (remuxSupported) {
+      const remuxOpt = document.createElement("option");
+      remuxOpt.value = "remux";
+      remuxOpt.textContent = remuxLikelyPlayable ? "Repair for browser" : "Repair for browser (May Fail)";
+      modeSelect.appendChild(remuxOpt);
+      modeSelect.value = remuxRecommended ? "remux" : "native";
+    } else {
+      modeSelect.value = "native";
+    }
+    modeLabel.appendChild(modeSelect);
+    controls.appendChild(modeLabel);
+
+    const hint = document.createElement("div");
+    hint.style.fontSize = "0.8rem";
+    hint.style.opacity = "0.85";
+
+    const video = document.createElement("video");
+    video.controls = true;
+    video.autoplay = true;
+    video.preload = "metadata";
+    video.className = "mkvVideo";
+
+    const setPlayback = () => {
+      const mode = modeSelect.value;
+      const useNative = mode === "native" || !remuxSupported;
+      const audioIndex = audioSelect ? audioSelect.value : "";
+      video.src = useNative ? fileURL(entry.path) : videoPlayURL(entry.path, audioIndex);
+      if (audioSelect) {
+        audioSelect.disabled = useNative || !remuxSupported;
+      }
+      if (useNative) {
+        if (!nativeLikely && probe.remuxReason) {
+          hint.textContent = `${formatLabel}: native browser playback is likely unreliable. ${probe.remuxReason}.`;
+        } else {
+          hint.textContent = `${formatLabel}: using direct browser playback.`;
+        }
+      } else {
+        hint.textContent = `${formatLabel}: server remuxes this file to a cached MP4 without re-encoding video.`;
+      }
+      video.load();
+    };
+
+    if (audioSelect) {
+      audioSelect.addEventListener("change", () => {
+        pauseThumbLoading(1500);
+        setPlayback();
+      });
+    }
+    modeSelect.addEventListener("change", () => {
+      pauseThumbLoading(1500);
+      setPlayback();
+    });
+
+    viewerBody.appendChild(controls);
+    viewerBody.appendChild(hint);
+    viewerBody.appendChild(video);
+    pauseThumbLoading(2000);
+    setPlayback();
+  } catch (err) {
+    fallbackVideoViewer(entry, `Video probe failed, falling back to direct playback: ${err.message || err}`);
+  }
 }
 
 async function openMKVViewer(entry) {
