@@ -54,13 +54,14 @@ type rootMount struct {
 }
 
 type app struct {
-	roots            []rootMount
-	histDir          string
-	password         string
-	authToken        string
-	thumbMu          sync.Map
-	thumbSem         chan struct{}
-	activeFileStream atomic.Int64
+	roots                 []rootMount
+	histDir               string
+	password              string
+	authToken             string
+	thumbMu               sync.Map
+	thumbSem              chan struct{}
+	remuxSem              chan struct{}
+	interactiveUntilNanos atomic.Int64
 }
 
 type statusRecorder struct {
@@ -209,7 +210,8 @@ func main() {
 		roots:    roots,
 		histDir:  histPath,
 		password: password,
-		thumbSem: make(chan struct{}, 1),
+		thumbSem: make(chan struct{}, 2),
+		remuxSem: make(chan struct{}, 1),
 	}
 	if password != "" {
 		tok := sha256.Sum256([]byte("rakuyo|" + password))
@@ -427,6 +429,7 @@ func (a *app) handleList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleFile(w http.ResponseWriter, r *http.Request) {
+	a.markInteractiveWindow(2 * time.Second)
 	rootID, err := strconv.Atoi(r.URL.Query().Get("root"))
 	if err != nil {
 		http.Error(w, "invalid root", http.StatusBadRequest)
@@ -458,8 +461,6 @@ func (a *app) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	a.activeFileStream.Add(1)
-	defer a.activeFileStream.Add(-1)
 	http.ServeContent(w, r, filepath.Base(real), st.ModTime(), f)
 }
 
@@ -545,9 +546,9 @@ func (a *app) handleThumb(w http.ResponseWriter, r *http.Request) {
 	tmp := cachePath + ".tmp.jpg"
 	switch mediaType {
 	case "image":
-		err = generateImageThumb(real, tmp, size)
+		err = generateImageThumb(r.Context(), real, tmp, size)
 	case "video":
-		err = generateVideoThumb(real, tmp, size)
+		err = generateVideoThumb(r.Context(), real, tmp, size)
 	}
 	if err != nil {
 		log.Printf("thumb failed media=%s root=%d rel=%q real=%q err=%v", mediaType, root.ID, rel, real, err)
@@ -591,6 +592,7 @@ func (a *app) handleMKVProbe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
+	a.markInteractiveWindow(2 * time.Second)
 	root, rel, real, err := a.resolveRequestPath(r)
 	if err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -605,8 +607,6 @@ func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	a.activeFileStream.Add(1)
-	defer a.activeFileStream.Add(-1)
 
 	probe, err := probeMKV(real)
 	if err != nil {
@@ -620,8 +620,10 @@ func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	videoIndex := probe.Video.Index
+	videoCodec := strings.ToLower(probe.Video.Codec)
 	audioCodec := codecForIndex(probe.Audio, audioIndex)
 	copyAudio := isMP4CopyAudioCodec(audioCodec)
+	copyVideo := isMP4CopyVideoCodec(videoCodec)
 
 	h := sha1.New()
 	io.WriteString(h, real)
@@ -639,6 +641,12 @@ func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
 	} else {
 		io.WriteString(h, "aac")
 	}
+	io.WriteString(h, "|")
+	if copyVideo {
+		io.WriteString(h, "vcopy")
+	} else {
+		io.WriteString(h, "vx264")
+	}
 	cachePath := filepath.Join(a.histDir, "mkv", hex.EncodeToString(h.Sum(nil))+".mp4")
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 		http.Error(w, "cache error", http.StatusInternalServerError)
@@ -650,7 +658,14 @@ func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
 		lock := a.lockFor(key)
 		lock.Lock()
 		if _, statErr := os.Stat(cachePath); statErr != nil {
-			if err := a.generateMKVPlayAsset(real, cachePath, videoIndex, audioIndex, copyAudio); err != nil {
+			if err := a.acquireRemuxSlot(r.Context()); err != nil {
+				lock.Unlock()
+				http.Error(w, "playback canceled", http.StatusRequestTimeout)
+				return
+			}
+			err := a.generateMKVPlayAsset(r.Context(), real, cachePath, videoIndex, audioIndex, copyVideo, copyAudio)
+			a.releaseRemuxSlot()
+			if err != nil {
 				lock.Unlock()
 				log.Printf("mkv play generate failed rel=%q real=%q err=%v", rel, real, err)
 				http.Error(w, "playback generation failed", http.StatusInternalServerError)
@@ -677,6 +692,7 @@ func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleMKVSub(w http.ResponseWriter, r *http.Request) {
+	a.markInteractiveWindow(2 * time.Second)
 	_, rel, real, err := a.resolveRequestPath(r)
 	if err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -691,8 +707,6 @@ func (a *app) handleMKVSub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	a.activeFileStream.Add(1)
-	defer a.activeFileStream.Add(-1)
 
 	probe, err := probeMKV(real)
 	if err != nil {
@@ -703,6 +717,11 @@ func (a *app) handleMKVSub(w http.ResponseWriter, r *http.Request) {
 	subIndex, err := selectSubIndex(r, probe)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	subCodec := codecForIndex(probe.Subs, subIndex)
+	if !isWebVTTConvertibleSubtitleCodec(subCodec) {
+		http.Error(w, "subtitle codec not supported for webvtt", http.StatusBadRequest)
 		return
 	}
 
@@ -725,7 +744,14 @@ func (a *app) handleMKVSub(w http.ResponseWriter, r *http.Request) {
 		lock := a.lockFor(key)
 		lock.Lock()
 		if _, statErr := os.Stat(cachePath); statErr != nil {
-			if err := generateMKVSubtitleAsset(real, cachePath, subIndex); err != nil {
+			if err := a.acquireRemuxSlot(r.Context()); err != nil {
+				lock.Unlock()
+				http.Error(w, "subtitle canceled", http.StatusRequestTimeout)
+				return
+			}
+			err := generateMKVSubtitleAsset(r.Context(), real, cachePath, subIndex)
+			a.releaseRemuxSlot()
+			if err != nil {
 				lock.Unlock()
 				log.Printf("mkv subtitle generate failed rel=%q real=%q err=%v", rel, real, err)
 				http.Error(w, "subtitle generation failed", http.StatusInternalServerError)
@@ -762,11 +788,11 @@ func (a *app) resolveRequestPath(r *http.Request) (rootMount, string, string, er
 
 func (a *app) acquireThumbSlot(ctx context.Context) error {
 	for {
-		if a.activeFileStream.Load() > 0 {
+		if time.Now().UnixNano() < a.interactiveUntilNanos.Load() {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(80 * time.Millisecond):
+			case <-time.After(50 * time.Millisecond):
 			}
 			continue
 		}
@@ -775,10 +801,7 @@ func (a *app) acquireThumbSlot(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case a.thumbSem <- struct{}{}:
-			if a.activeFileStream.Load() == 0 {
-				return nil
-			}
-			<-a.thumbSem
+			return nil
 		}
 	}
 }
@@ -787,6 +810,35 @@ func (a *app) releaseThumbSlot() {
 	select {
 	case <-a.thumbSem:
 	default:
+	}
+}
+
+func (a *app) acquireRemuxSlot(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case a.remuxSem <- struct{}{}:
+		return nil
+	}
+}
+
+func (a *app) releaseRemuxSlot() {
+	select {
+	case <-a.remuxSem:
+	default:
+	}
+}
+
+func (a *app) markInteractiveWindow(d time.Duration) {
+	now := time.Now().Add(d).UnixNano()
+	for {
+		prev := a.interactiveUntilNanos.Load()
+		if prev >= now {
+			return
+		}
+		if a.interactiveUntilNanos.CompareAndSwap(prev, now) {
+			return
+		}
 	}
 }
 
@@ -898,14 +950,32 @@ func codecForIndex(tracks []mkvTrack, index int) string {
 
 func isMP4CopyAudioCodec(codec string) bool {
 	switch strings.ToLower(codec) {
-	case "aac", "mp3", "alac":
+	case "aac":
 		return true
 	default:
 		return false
 	}
 }
 
-func (a *app) generateMKVPlayAsset(src, dst string, videoIndex, audioIndex int, copyAudio bool) error {
+func isMP4CopyVideoCodec(codec string) bool {
+	switch strings.ToLower(codec) {
+	case "h264":
+		return true
+	default:
+		return false
+	}
+}
+
+func isWebVTTConvertibleSubtitleCodec(codec string) bool {
+	switch strings.ToLower(codec) {
+	case "ass", "ssa", "subrip", "srt", "webvtt", "mov_text", "text":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *app) generateMKVPlayAsset(ctx context.Context, src, dst string, videoIndex, audioIndex int, copyVideo, copyAudio bool) error {
 	tmp := dst + ".tmp.mp4"
 	args := []string{
 		"-hide_banner",
@@ -915,16 +985,20 @@ func (a *app) generateMKVPlayAsset(src, dst string, videoIndex, audioIndex int, 
 		"-map", fmt.Sprintf("0:%d", audioIndex),
 		"-map", "-0:s",
 		"-map", "-0:d",
-		"-c:v", "copy",
+	}
+	if copyVideo {
+		args = append(args, "-c:v", "copy")
+	} else {
+		args = append(args, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p")
 	}
 	if copyAudio {
 		args = append(args, "-c:a", "copy")
 	} else {
 		args = append(args, "-c:a", "aac", "-b:a", "192k")
 	}
-	args = append(args, "-movflags", "+faststart", "-f", "mp4", "-y", tmp)
+	args = append(args, "-map_metadata", "-1", "-movflags", "+faststart", "-f", "mp4", "-y", tmp)
 
-	cmd := exec.Command("ffmpeg", args...)
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if len(out) > 0 {
@@ -935,9 +1009,10 @@ func (a *app) generateMKVPlayAsset(src, dst string, videoIndex, audioIndex int, 
 	return os.Rename(tmp, dst)
 }
 
-func generateMKVSubtitleAsset(src, dst string, subIndex int) error {
+func generateMKVSubtitleAsset(ctx context.Context, src, dst string, subIndex int) error {
 	tmp := dst + ".tmp.vtt"
-	cmd := exec.Command(
+	cmd := exec.CommandContext(
+		ctx,
 		"ffmpeg",
 		"-hide_banner",
 		"-loglevel", "error",
@@ -1039,7 +1114,12 @@ func serveThumbFile(w http.ResponseWriter, r *http.Request, thumbPath string) {
 	http.ServeFile(w, r, thumbPath)
 }
 
-func generateImageThumb(src, dst string, maxSize int) error {
+func generateImageThumb(ctx context.Context, src, dst string, maxSize int) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 	f, err := os.Open(src)
 	if err != nil {
 		return err
@@ -1049,6 +1129,11 @@ func generateImageThumb(src, dst string, maxSize int) error {
 	img, _, err := image.Decode(f)
 	if err != nil {
 		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
 	b := img.Bounds()
@@ -1071,9 +1156,10 @@ func generateImageThumb(src, dst string, maxSize int) error {
 	return jpeg.Encode(out, dstImg, &jpeg.Options{Quality: 82})
 }
 
-func generateVideoThumb(src, dst string, maxSize int) error {
+func generateVideoThumb(ctx context.Context, src, dst string, maxSize int) error {
 	vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", maxSize, maxSize)
-	cmd := exec.Command(
+	cmd := exec.CommandContext(
+		ctx,
 		"ffmpeg",
 		"-hide_banner",
 		"-loglevel", "error",
