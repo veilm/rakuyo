@@ -105,6 +105,7 @@ type listResponse struct {
 
 type ffprobeOutput struct {
 	Streams []ffprobeStream `json:"streams"`
+	Format  ffprobeFormat   `json:"format"`
 }
 
 type ffprobeStream struct {
@@ -115,6 +116,11 @@ type ffprobeStream struct {
 	CodecType   string            `json:"codec_type"`
 	Disposition ffDisposition     `json:"disposition"`
 	Tags        map[string]string `json:"tags"`
+}
+
+type ffprobeFormat struct {
+	FormatName     string `json:"format_name"`
+	FormatLongName string `json:"format_long_name"`
 }
 
 type ffDisposition struct {
@@ -138,6 +144,18 @@ type mkvProbeResponse struct {
 	Audio  []mkvTrack `json:"audio"`
 	Subs   []mkvTrack `json:"subs"`
 	Source string     `json:"source"`
+}
+
+type videoProbeResponse struct {
+	Video            mkvTrack   `json:"video"`
+	Audio            []mkvTrack `json:"audio"`
+	Source           string     `json:"source"`
+	FormatName       string     `json:"formatName,omitempty"`
+	FormatLongName   string     `json:"formatLongName,omitempty"`
+	NativeLikely     bool       `json:"nativeLikely"`
+	RemuxSupported   bool       `json:"remuxSupported"`
+	RemuxRecommended bool       `json:"remuxRecommended"`
+	RemuxReason      string     `json:"remuxReason,omitempty"`
 }
 
 func main() {
@@ -229,6 +247,8 @@ func main() {
 	mux.HandleFunc("/api/list", a.withAuth(a.handleList))
 	mux.HandleFunc("/api/file", a.withAuth(a.handleFile))
 	mux.HandleFunc("/api/thumb", a.withAuth(a.handleThumb))
+	mux.HandleFunc("/api/video/probe", a.withAuth(a.handleVideoProbe))
+	mux.HandleFunc("/api/video/play", a.withAuth(a.handleVideoPlay))
 	mux.HandleFunc("/api/mkv/probe", a.withAuth(a.handleMKVProbe))
 	mux.HandleFunc("/api/mkv/play", a.withAuth(a.handleMKVPlay))
 	mux.HandleFunc("/api/mkv/sub", a.withAuth(a.handleMKVSub))
@@ -247,7 +267,7 @@ func main() {
 	}
 	log.Printf("thumb cache: %s", histPath)
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		log.Printf("warning: ffmpeg not found, video thumbnails will fail: %v", err)
+		log.Printf("warning: ffmpeg not found, video thumbnails and remux playback will fail: %v", err)
 	}
 	if password != "" {
 		log.Printf("auth: enabled")
@@ -595,6 +615,134 @@ func (a *app) handleMKVProbe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, probe)
 }
 
+func (a *app) handleVideoProbe(w http.ResponseWriter, r *http.Request) {
+	_, rel, real, err := a.resolveRequestPath(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(real))
+	if !isVideoExt(ext) || ext == ".mkv" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "not a supported video file"})
+		return
+	}
+	st, err := os.Stat(real)
+	if err != nil || st.IsDir() {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
+
+	probe, err := probeVideo(real)
+	if err != nil {
+		log.Printf("video probe failed rel=%q real=%q err=%v", rel, real, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "probe failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, probe)
+}
+
+func (a *app) handleVideoPlay(w http.ResponseWriter, r *http.Request) {
+	a.markInteractiveWindow(2 * time.Second)
+	_, rel, real, err := a.resolveRequestPath(r)
+	if err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(real))
+	if !isVideoExt(ext) || ext == ".mkv" {
+		http.Error(w, "not a supported video file", http.StatusBadRequest)
+		return
+	}
+	st, err := os.Stat(real)
+	if err != nil || st.IsDir() {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	probe, err := probeVideo(real)
+	if err != nil {
+		log.Printf("video probe failed rel=%q real=%q err=%v", rel, real, err)
+		http.Error(w, "probe failed", http.StatusInternalServerError)
+		return
+	}
+	if !probe.RemuxSupported {
+		http.Error(w, "video codec not supported for remux playback", http.StatusBadRequest)
+		return
+	}
+
+	audioIndex, err := selectOptionalAudioIndex(r, probe.Audio)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	copyAudio := false
+	audioCodec := ""
+	if audioIndex >= 0 {
+		audioCodec = codecForIndex(probe.Audio, audioIndex)
+		copyAudio = isMP4CopyAudioCodec(audioCodec)
+	}
+
+	h := sha1.New()
+	io.WriteString(h, real)
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.FormatInt(st.ModTime().UnixNano(), 10))
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.FormatInt(st.Size(), 10))
+	io.WriteString(h, "|")
+	io.WriteString(h, probe.FormatName)
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.Itoa(probe.Video.Index))
+	io.WriteString(h, "|")
+	io.WriteString(h, strconv.Itoa(audioIndex))
+	io.WriteString(h, "|")
+	if copyAudio {
+		io.WriteString(h, "copy")
+	} else {
+		io.WriteString(h, "aac")
+	}
+	cachePath := filepath.Join(a.histDir, "video", hex.EncodeToString(h.Sum(nil))+".mp4")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		http.Error(w, "cache error", http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := os.Stat(cachePath); err != nil {
+		key := "video-play:" + cachePath
+		lock := a.lockFor(key)
+		lock.Lock()
+		if _, statErr := os.Stat(cachePath); statErr != nil {
+			if err := a.acquireRemuxSlot(r.Context()); err != nil {
+				lock.Unlock()
+				http.Error(w, "playback canceled", http.StatusRequestTimeout)
+				return
+			}
+			err := generateVideoPlayAsset(r.Context(), real, cachePath, probe.FormatName, probe.Video.Index, audioIndex, audioCodec, copyAudio)
+			a.releaseRemuxSlot()
+			if err != nil {
+				lock.Unlock()
+				log.Printf("video play generate failed rel=%q real=%q err=%v", rel, real, err)
+				http.Error(w, "playback generation failed", http.StatusInternalServerError)
+				return
+			}
+		}
+		lock.Unlock()
+	}
+
+	out, err := os.Open(cachePath)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	defer out.Close()
+	outInfo, err := out.Stat()
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp4")
+	http.ServeContent(w, r, filepath.Base(cachePath), outInfo.ModTime(), out)
+}
+
 func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
 	a.markInteractiveWindow(2 * time.Second)
 	root, rel, real, err := a.resolveRequestPath(r)
@@ -845,13 +993,8 @@ func (a *app) markInteractiveWindow(d time.Duration) {
 }
 
 func probeMKV(src string) (mkvProbeResponse, error) {
-	cmd := exec.Command("ffprobe", "-v", "error", "-show_streams", "-of", "json", src)
-	out, err := cmd.Output()
+	probe, err := ffprobeMedia(src)
 	if err != nil {
-		return mkvProbeResponse{}, err
-	}
-	var probe ffprobeOutput
-	if err := json.Unmarshal(out, &probe); err != nil {
 		return mkvProbeResponse{}, err
 	}
 
@@ -892,6 +1035,61 @@ func probeMKV(src string) (mkvProbeResponse, error) {
 	return resp, nil
 }
 
+func ffprobeMedia(src string) (ffprobeOutput, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", src)
+	out, err := cmd.Output()
+	if err != nil {
+		return ffprobeOutput{}, err
+	}
+	var probe ffprobeOutput
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return ffprobeOutput{}, err
+	}
+	return probe, nil
+}
+
+func probeVideo(src string) (videoProbeResponse, error) {
+	probe, err := ffprobeMedia(src)
+	if err != nil {
+		return videoProbeResponse{}, err
+	}
+
+	resp := videoProbeResponse{
+		Audio:          make([]mkvTrack, 0, 4),
+		Source:         filepath.Base(src),
+		FormatName:     probe.Format.FormatName,
+		FormatLongName: probe.Format.FormatLongName,
+	}
+	for _, s := range probe.Streams {
+		track := mkvTrack{
+			Index:    s.Index,
+			Codec:    s.CodecName,
+			Profile:  s.Profile,
+			PixFmt:   s.PixFmt,
+			Language: streamTag(s.Tags, "language"),
+			Title:    streamTag(s.Tags, "title"),
+			Default:  s.Disposition.Default == 1,
+			Forced:   s.Disposition.Forced == 1,
+		}
+		switch s.CodecType {
+		case "video":
+			if resp.Video.Codec == "" {
+				resp.Video = track
+			}
+		case "audio":
+			resp.Audio = append(resp.Audio, track)
+		}
+	}
+	if resp.Video.Codec == "" {
+		return videoProbeResponse{}, errors.New("no video stream")
+	}
+	resp.NativeLikely = isLikelyNativeVideoProbe(resp)
+	resp.RemuxSupported = isMP4CopyVideoTrack(resp.Video)
+	resp.RemuxReason = remuxReason(resp)
+	resp.RemuxRecommended = resp.RemuxSupported && resp.RemuxReason != ""
+	return resp, nil
+}
+
 func streamTag(tags map[string]string, key string) string {
 	if len(tags) == 0 {
 		return ""
@@ -902,6 +1100,31 @@ func streamTag(tags map[string]string, key string) string {
 		}
 	}
 	return ""
+}
+
+func selectOptionalAudioIndex(r *http.Request, tracks []mkvTrack) (int, error) {
+	if len(tracks) == 0 {
+		return -1, nil
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("audio"))
+	if raw != "" {
+		idx, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, errors.New("invalid audio index")
+		}
+		for _, a := range tracks {
+			if a.Index == idx {
+				return idx, nil
+			}
+		}
+		return 0, errors.New("audio track not found")
+	}
+	for _, a := range tracks {
+		if a.Default {
+			return a.Index, nil
+		}
+	}
+	return tracks[0].Index, nil
 }
 
 func selectAudioIndex(r *http.Request, probe mkvProbeResponse) (int, error) {
@@ -993,6 +1216,33 @@ func isWebVTTConvertibleSubtitleCodec(codec string) bool {
 	}
 }
 
+func formatHasName(formatName, want string) bool {
+	for _, part := range strings.Split(strings.ToLower(formatName), ",") {
+		if strings.TrimSpace(part) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func isLikelyNativeVideoProbe(resp videoProbeResponse) bool {
+	if formatHasName(resp.FormatName, "mov") || formatHasName(resp.FormatName, "mp4") || formatHasName(resp.FormatName, "webm") {
+		return true
+	}
+	return false
+}
+
+func remuxReason(resp videoProbeResponse) string {
+	switch {
+	case formatHasName(resp.FormatName, "mpegts"):
+		return "source is MPEG-TS, which browsers typically refuse as direct file playback"
+	case !isLikelyNativeVideoProbe(resp):
+		return "source container is not a browser-friendly direct playback format"
+	default:
+		return ""
+	}
+}
+
 func (a *app) generateMKVPlayAsset(ctx context.Context, src, dst string, videoIndex, audioIndex int, copyVideo, copyAudio bool) error {
 	tmp := dst + ".tmp.mp4"
 	args := []string{
@@ -1014,6 +1264,45 @@ func (a *app) generateMKVPlayAsset(ctx context.Context, src, dst string, videoIn
 		args = append(args, "-c:a", "aac", "-b:a", "192k")
 	}
 	args = append(args, "-map_metadata", "-1", "-movflags", "+faststart", "-f", "mp4", "-y", tmp)
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if len(out) > 0 {
+			return fmt.Errorf("ffmpeg: %s", strings.TrimSpace(string(out)))
+		}
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+func generateVideoPlayAsset(ctx context.Context, src, dst, formatName string, videoIndex, audioIndex int, audioCodec string, copyAudio bool) error {
+	tmp := dst + ".tmp.mp4"
+	args := []string{
+		"-hide_banner",
+		"-loglevel", "error",
+		"-fflags", "+genpts+discardcorrupt",
+		"-err_detect", "ignore_err",
+		"-i", src,
+		"-map", fmt.Sprintf("0:%d", videoIndex),
+		"-map", "-0:s",
+		"-map", "-0:d",
+		"-c:v", "copy",
+	}
+	if audioIndex >= 0 {
+		args = append(args, "-map", fmt.Sprintf("0:%d", audioIndex))
+		if copyAudio {
+			args = append(args, "-c:a", "copy")
+			if strings.EqualFold(audioCodec, "aac") {
+				args = append(args, "-bsf:a", "aac_adtstoasc")
+			}
+		} else {
+			args = append(args, "-c:a", "aac", "-b:a", "192k")
+		}
+	} else {
+		args = append(args, "-an")
+	}
+	args = append(args, "-map_metadata", "-1", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", "-f", "mp4", "-y", tmp)
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	out, err := cmd.CombinedOutput()
