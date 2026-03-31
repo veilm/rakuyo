@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +35,11 @@ import (
 )
 
 const authCookieName = "rakuyo_auth"
+
+var (
+	unixFilenamePattern = regexp.MustCompile(`^\d{10}(?:\D|$)`)
+	numericNotePattern  = regexp.MustCompile(`^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$`)
+)
 
 type multiStringFlag []string
 
@@ -246,6 +252,7 @@ func main() {
 	mux.HandleFunc("/api/roots", a.withAuth(a.handleRoots))
 	mux.HandleFunc("/api/list", a.withAuth(a.handleList))
 	mux.HandleFunc("/api/file", a.withAuth(a.handleFile))
+	mux.HandleFunc("/api/media-note", a.withAuth(a.handleMediaNote))
 	mux.HandleFunc("/api/thumb", a.withAuth(a.handleThumb))
 	mux.HandleFunc("/api/video/probe", a.withAuth(a.handleVideoProbe))
 	mux.HandleFunc("/api/video/play", a.withAuth(a.handleVideoPlay))
@@ -488,6 +495,82 @@ func (a *app) handleFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, filepath.Base(real), st.ModTime(), f)
 }
 
+func (a *app) handleMediaNote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+
+	var req struct {
+		Root int    `json:"root"`
+		Path string `json:"path"`
+		Note string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+
+	root, rel, logicalAbs, real, err := a.resolvePath(req.Root, req.Path)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	st, err := os.Stat(real)
+	if err != nil || st.IsDir() {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(real))
+	if !isImageExt(ext) && !isVideoExt(ext) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "not an image or video"})
+		return
+	}
+
+	output, err := deriveMediaNoteOutput(req.Note)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	finalLogicalAbs := logicalAbs
+	finalRel := filepath.ToSlash(rel)
+	renamed := false
+	if !unixFilenamePattern.MatchString(filepath.Base(finalLogicalAbs)) {
+		renamedPath, err := renameWithUnixPrefix(finalLogicalAbs)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to rename file"})
+			return
+		}
+		finalLogicalAbs = renamedPath
+		finalRel = relWithRenamedBase(rel, filepath.Base(finalLogicalAbs))
+		renamed = true
+	}
+
+	tags := append(tagsForPath(finalLogicalAbs), output)
+	if err := runTag2CreateLink(r.Context(), finalLogicalAbs, tags); err != nil {
+		if renamed {
+			if revertErr := os.Rename(finalLogicalAbs, logicalAbs); revertErr != nil {
+				log.Printf("media note revert failed root=%d rel=%q current=%q err=%v", root.ID, rel, finalLogicalAbs, revertErr)
+				err = fmt.Errorf("%w (rename rollback failed: %v)", err, revertErr)
+			}
+		}
+		log.Printf("media note tag2 failed root=%d rel=%q file=%q err=%v", root.ID, rel, finalLogicalAbs, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"name":    filepath.Base(finalLogicalAbs),
+		"path":    finalRel,
+		"output":  output,
+		"renamed": renamed,
+	})
+}
+
 func (a *app) handleThumb(w http.ResponseWriter, r *http.Request) {
 	rootID, err := strconv.Atoi(r.URL.Query().Get("root"))
 	if err != nil {
@@ -589,7 +672,7 @@ func (a *app) handleThumb(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleMKVProbe(w http.ResponseWriter, r *http.Request) {
-	root, rel, real, err := a.resolveRequestPath(r)
+	root, rel, _, real, err := a.resolveRequestPath(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -616,7 +699,7 @@ func (a *app) handleMKVProbe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleVideoProbe(w http.ResponseWriter, r *http.Request) {
-	_, rel, real, err := a.resolveRequestPath(r)
+	_, rel, _, real, err := a.resolveRequestPath(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -643,7 +726,7 @@ func (a *app) handleVideoProbe(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleVideoPlay(w http.ResponseWriter, r *http.Request) {
 	a.markInteractiveWindow(2 * time.Second)
-	_, rel, real, err := a.resolveRequestPath(r)
+	_, rel, _, real, err := a.resolveRequestPath(r)
 	if err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
@@ -745,7 +828,7 @@ func (a *app) handleVideoPlay(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
 	a.markInteractiveWindow(2 * time.Second)
-	root, rel, real, err := a.resolveRequestPath(r)
+	root, rel, _, real, err := a.resolveRequestPath(r)
 	if err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
@@ -843,7 +926,7 @@ func (a *app) handleMKVPlay(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleMKVSub(w http.ResponseWriter, r *http.Request) {
 	a.markInteractiveWindow(2 * time.Second)
-	_, rel, real, err := a.resolveRequestPath(r)
+	_, rel, _, real, err := a.resolveRequestPath(r)
 	if err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
@@ -916,24 +999,28 @@ func (a *app) handleMKVSub(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, cachePath)
 }
 
-func (a *app) resolveRequestPath(r *http.Request) (rootMount, string, string, error) {
+func (a *app) resolveRequestPath(r *http.Request) (rootMount, string, string, string, error) {
 	rootID, err := strconv.Atoi(r.URL.Query().Get("root"))
 	if err != nil {
-		return rootMount{}, "", "", errors.New("invalid root")
+		return rootMount{}, "", "", "", errors.New("invalid root")
 	}
+	return a.resolvePath(rootID, r.URL.Query().Get("path"))
+}
+
+func (a *app) resolvePath(rootID int, rawRel string) (rootMount, string, string, string, error) {
 	root, ok := a.getRoot(rootID)
 	if !ok {
-		return rootMount{}, "", "", errors.New("root not found")
+		return rootMount{}, "", "", "", errors.New("root not found")
 	}
-	rel, err := cleanRel(r.URL.Query().Get("path"))
+	rel, err := cleanRel(rawRel)
 	if err != nil {
-		return rootMount{}, "", "", errors.New("invalid path")
+		return rootMount{}, "", "", "", errors.New("invalid path")
 	}
-	_, real, err := resolveExisting(root, rel)
+	logicalAbs, real, err := resolveExisting(root, rel)
 	if err != nil {
-		return rootMount{}, "", "", errors.New("not found")
+		return rootMount{}, "", "", "", errors.New("not found")
 	}
-	return root, rel, real, nil
+	return root, rel, logicalAbs, real, nil
 }
 
 func (a *app) acquireThumbSlot(ctx context.Context) error {
@@ -1359,6 +1446,87 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func deriveMediaNoteOutput(note string) (string, error) {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return "", errors.New("note is empty")
+	}
+	if numericNotePattern.MatchString(note) {
+		value, err := strconv.ParseFloat(note, 64)
+		if err != nil {
+			return "", errors.New("invalid numeric note")
+		}
+		for value > 20 {
+			value /= 10
+		}
+		return "mb_score:" + strconv.FormatFloat(value, 'f', -1, 64), nil
+	}
+	return "rakuyo_note:" + note, nil
+}
+
+func renameWithUnixPrefix(src string) (string, error) {
+	if unixFilenamePattern.MatchString(filepath.Base(src)) {
+		return src, nil
+	}
+	dir := filepath.Dir(src)
+	base := strings.ReplaceAll(filepath.Base(src), "'", "_")
+	unix := time.Now().Unix()
+	for {
+		dst := filepath.Join(dir, fmt.Sprintf("%d_%s", unix, base))
+		if _, err := os.Lstat(dst); err == nil {
+			unix++
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if err := os.Rename(src, dst); err != nil {
+			return "", err
+		}
+		return dst, nil
+	}
+}
+
+func relWithRenamedBase(rel, base string) string {
+	dir := filepath.Dir(rel)
+	if dir == "." || dir == "" {
+		return base
+	}
+	return filepath.ToSlash(filepath.Join(dir, base))
+}
+
+func tagsForPath(filePath string) []string {
+	dir := filepath.ToSlash(filepath.Dir(filepath.Clean(filePath)))
+	if dir == "." || dir == "/" || dir == "" {
+		return nil
+	}
+	parts := strings.Split(dir, "/")
+	tags := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		tags = append(tags, strings.ReplaceAll(part, " ", "_"))
+	}
+	return tags
+}
+
+func runTag2CreateLink(ctx context.Context, filePath string, tags []string) error {
+	tag2Path, err := exec.LookPath("tag2")
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, tag2Path, "create-link", filePath)
+	cmd.Stdin = strings.NewReader(strings.Join(tags, "\n") + "\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if len(out) > 0 {
+			return fmt.Errorf("tag2: %s", strings.TrimSpace(string(out)))
+		}
+		return err
+	}
+	return nil
 }
 
 func cleanRel(raw string) (string, error) {

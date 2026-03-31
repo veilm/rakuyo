@@ -35,10 +35,14 @@ const viewerModal = document.getElementById("viewerModal");
 const viewerBody = document.getElementById("viewerBody");
 const viewerTitle = document.getElementById("viewerTitle");
 const viewerClose = document.getElementById("viewerClose");
+const viewerNoteForm = document.getElementById("viewerNoteForm");
+const viewerNoteInput = document.getElementById("viewerNoteInput");
+const viewerNoteStatus = document.getElementById("viewerNoteStatus");
 let thumbObserver = null;
 const thumbLoader = {
   pauseUntil: 0,
 };
+let viewerEntry = null;
 
 const folderSVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>';
@@ -205,12 +209,62 @@ function clearViewer() {
   viewerBody.innerHTML = "";
 }
 
+function isViewerNoteEntry(entry) {
+  if (!entry || entry.isDir) {
+    return false;
+  }
+  const mime = (entry.mime || "").toLowerCase();
+  if (mime.startsWith("image/") || mime.startsWith("video/")) {
+    return true;
+  }
+  const name = (entry.name || "").toLowerCase();
+  return (
+    name.endsWith(".jpg") ||
+    name.endsWith(".jpeg") ||
+    name.endsWith(".png") ||
+    name.endsWith(".gif") ||
+    name.endsWith(".webp") ||
+    name.endsWith(".bmp") ||
+    name.endsWith(".mp4") ||
+    name.endsWith(".mkv") ||
+    name.endsWith(".webm") ||
+    name.endsWith(".mov") ||
+    name.endsWith(".avi") ||
+    name.endsWith(".m4v") ||
+    name.endsWith(".ts")
+  );
+}
+
+function resetViewerNoteBar() {
+  viewerEntry = null;
+  viewerNoteForm.classList.add("hidden");
+  viewerNoteInput.value = "";
+  viewerNoteInput.disabled = false;
+  viewerNoteInput.placeholder = "Add note...";
+  viewerNoteStatus.textContent = "";
+}
+
+function setupViewerNoteBar(entry) {
+  if (!isViewerNoteEntry(entry)) {
+    resetViewerNoteBar();
+    return;
+  }
+  viewerEntry = entry;
+  viewerNoteForm.classList.remove("hidden");
+  viewerNoteInput.value = "";
+  viewerNoteInput.disabled = false;
+  viewerNoteInput.placeholder = "Add note...";
+  viewerNoteStatus.textContent = "";
+}
+
 function closeViewer() {
   clearViewer();
+  resetViewerNoteBar();
   viewerModal.classList.add("hidden");
 }
 
 function openViewer(entry) {
+  setupViewerNoteBar(entry);
   if (entry.name.toLowerCase().endsWith(".mkv")) {
     openMKVViewer(entry);
     return;
@@ -856,6 +910,44 @@ gridSizeInput.addEventListener("input", () => {
   applyGridSize();
   if (settings.viewMode === "gallery") {
     renderGallery(state.entries);
+  }
+});
+
+viewerNoteForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!viewerEntry || viewerNoteInput.disabled) {
+    return;
+  }
+
+  const note = viewerNoteInput.value.trim();
+  if (!note) {
+    viewerNoteStatus.textContent = "Enter a note first.";
+    return;
+  }
+
+  const entry = viewerEntry;
+  viewerNoteInput.disabled = true;
+  viewerNoteStatus.textContent = "Saving...";
+
+  try {
+    const res = await api("/api/media-note", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        root: state.rootId,
+        path: entry.path,
+        note,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `save failed: ${res.status}`);
+    }
+    closeViewer();
+    await loadList();
+  } catch (err) {
+    viewerNoteInput.disabled = false;
+    viewerNoteStatus.textContent = err.message || String(err);
   }
 });
 
