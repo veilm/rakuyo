@@ -334,6 +334,7 @@ function fallbackVideoViewer(entry, message) {
   video.src = fileURL(entry.path);
   video.controls = true;
   video.autoplay = true;
+  video.loop = true;
   video.preload = "metadata";
   viewerBody.appendChild(video);
   if (message) {
@@ -417,6 +418,7 @@ async function openVideoViewer(entry) {
     const video = document.createElement("video");
     video.controls = true;
     video.autoplay = true;
+    video.loop = true;
     video.preload = "metadata";
     video.className = "mkvVideo";
 
@@ -541,6 +543,7 @@ async function openMKVViewer(entry) {
     const video = document.createElement("video");
     video.controls = true;
     video.autoplay = true;
+    video.loop = true;
     video.preload = "metadata";
     video.className = "mkvVideo";
 
