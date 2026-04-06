@@ -34,7 +34,11 @@ import (
 	"golang.org/x/image/draw"
 )
 
-const authCookieName = "rakuyo_auth"
+const (
+	authCookieName     = "rakuyo_auth"
+	authCookieLifetime = 60 * 24 * time.Hour
+	authCookieMaxAge   = int(authCookieLifetime / time.Second)
+)
 
 var (
 	unixFilenamePattern = regexp.MustCompile(`^\d{10}(?:\D|$)`)
@@ -336,13 +340,7 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     authCookieName,
-		Value:    a.authToken,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	http.SetCookie(w, a.newAuthCookie(a.authToken, time.Now().Add(authCookieLifetime)))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "auth": true})
 }
 
@@ -352,10 +350,23 @@ func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *app) newAuthCookie(value string, expires time.Time) *http.Cookie {
+	return &http.Cookie{
+		Name:     authCookieName,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   authCookieMaxAge,
+		Expires:  expires,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
 }
 
 func (a *app) handleRoots(w http.ResponseWriter, r *http.Request) {

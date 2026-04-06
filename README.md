@@ -6,6 +6,7 @@ Minimal remote file manager (Go backend + vanilla JS frontend).
 
 - Expose one or more host directories (`-d` repeatable)
 - Optional shared password for all access (`--password`)
+- Persistent login cookie when password auth is enabled (60 days)
 - Directory navigation from browser
 - File open/download
 - Image and video thumbnails
@@ -31,3 +32,4 @@ go run ./cmd/rakuyo \
 Open `http://<host-ip>:8080` from another device on your LAN.
 
 If `--password` is omitted, browsing is open to anyone who can reach the server.
+When `--password` is enabled, successful logins are remembered for 60 days unless the user logs out.
