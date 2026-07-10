@@ -91,6 +91,23 @@ button {
   cursor: pointer;
 }
 
+.buttonLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--control-bg);
+  color: var(--control-text);
+  padding: 0.45rem 0.65rem;
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+.buttonLink:hover {
+  border-color: var(--accent);
+}
+
 button:disabled,
 select:disabled,
 input:disabled {
@@ -101,7 +118,8 @@ input:disabled {
 button:focus-visible,
 select:focus-visible,
 input:focus-visible,
-a:focus-visible {
+a:focus-visible,
+textarea:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -388,6 +406,52 @@ body[data-theme="dark"] .gfolder {
   width: min(700px, 92vw);
 }
 
+.viewerBodyText {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.75rem;
+  min-height: min(72vh, 760px);
+  padding: 0;
+}
+
+.textEditor {
+  width: 100%;
+  min-height: min(68vh, 720px);
+  flex: 1;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0.85rem;
+  background: var(--viewer-card);
+  color: var(--viewer-text);
+  font: 0.94rem/1.45 "IBM Plex Mono", "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  tab-size: 2;
+}
+
+.textEditorBar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-top: 1px solid var(--viewer-border);
+  background: var(--surface-2);
+}
+
+.textEditorStatus {
+  min-width: 0;
+  color: var(--viewer-text);
+  font-size: 0.84rem;
+  opacity: 0.82;
+}
+
+.textEditorActions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
 .viewerNoteBar {
   position: absolute;
   left: 50%;
@@ -461,5 +525,18 @@ body[data-theme="dark"] .gfolder {
 
   .viewerModal {
     padding: 0.75rem 0.75rem 5.25rem;
+  }
+
+  .viewerBodyText {
+    min-height: min(70vh, 620px);
+  }
+
+  .textEditorBar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .textEditorActions {
+    justify-content: flex-end;
   }
 }

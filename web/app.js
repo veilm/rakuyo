@@ -165,6 +165,11 @@ function fileURL(entryPath) {
   return `/api/file?${q.toString()}`;
 }
 
+function textURL(entryPath) {
+  const q = new URLSearchParams({ root: String(state.rootId), path: entryPath });
+  return `/api/text?${q.toString()}`;
+}
+
 function mkvProbeURL(entryPath) {
   const q = new URLSearchParams({ root: String(state.rootId), path: entryPath });
   return `/api/mkv/probe?${q.toString()}`;
@@ -207,6 +212,7 @@ function browseURL(rootId, entryPath) {
 
 function clearViewer() {
   viewerBody.innerHTML = "";
+  viewerBody.classList.remove("viewerBodyText");
 }
 
 function isViewerNoteEntry(entry) {
@@ -244,6 +250,14 @@ function resetViewerNoteBar() {
   viewerNoteStatus.textContent = "";
 }
 
+function isEditableTextEntry(entry) {
+  if (!entry || entry.isDir) {
+    return false;
+  }
+  const name = (entry.name || "").toLowerCase();
+  return name.endsWith(".md") || name.endsWith(".txt");
+}
+
 function setupViewerNoteBar(entry) {
   if (!isViewerNoteEntry(entry)) {
     resetViewerNoteBar();
@@ -265,6 +279,11 @@ function closeViewer() {
 
 function openViewer(entry) {
   setupViewerNoteBar(entry);
+  if (isEditableTextEntry(entry)) {
+    openTextEditor(entry);
+    return;
+  }
+
   if (entry.name.toLowerCase().endsWith(".mkv")) {
     openMKVViewer(entry);
     return;
@@ -299,6 +318,129 @@ function openViewer(entry) {
     viewerBody.appendChild(link);
   }
   viewerModal.classList.remove("hidden");
+}
+
+async function openTextEditor(entry) {
+  resetViewerNoteBar();
+  viewerTitle.textContent = entry.name;
+  clearViewer();
+  viewerModal.classList.remove("hidden");
+  viewerBody.textContent = "Loading text...";
+
+  try {
+    const res = await api(textURL(entry.path));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `load failed: ${res.status}`);
+    }
+
+    viewerBody.innerHTML = "";
+    viewerBody.classList.add("viewerBodyText");
+
+    const editor = document.createElement("textarea");
+    editor.className = "textEditor";
+    editor.value = data.content || "";
+    editor.spellcheck = false;
+    editor.wrap = "soft";
+
+    const bar = document.createElement("div");
+    bar.className = "textEditorBar";
+
+    const status = document.createElement("div");
+    status.className = "textEditorStatus";
+    status.textContent = `${fmtSize(data.size || 0)} loaded`;
+
+    const actions = document.createElement("div");
+    actions.className = "textEditorActions";
+
+    const revertBtn = document.createElement("button");
+    revertBtn.type = "button";
+    revertBtn.textContent = "Revert";
+    revertBtn.disabled = true;
+
+    const openBtn = document.createElement("a");
+    openBtn.href = fileURL(entry.path);
+    openBtn.target = "_blank";
+    openBtn.rel = "noopener";
+    openBtn.className = "buttonLink";
+    openBtn.textContent = "Open";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.textContent = "Save";
+    saveBtn.disabled = true;
+
+    let savedContent = editor.value;
+    let savedModTime = data.modTime || "";
+
+    const syncDirty = () => {
+      const dirty = editor.value !== savedContent;
+      saveBtn.disabled = !dirty;
+      revertBtn.disabled = !dirty;
+      if (dirty) {
+        status.textContent = "Unsaved changes";
+      } else {
+        status.textContent = `${fmtSize(new Blob([savedContent]).size)} saved`;
+      }
+    };
+
+    editor.addEventListener("input", syncDirty);
+    revertBtn.addEventListener("click", () => {
+      editor.value = savedContent;
+      syncDirty();
+      editor.focus();
+    });
+    saveBtn.addEventListener("click", async () => {
+      saveBtn.disabled = true;
+      revertBtn.disabled = true;
+      editor.disabled = true;
+      status.textContent = "Saving...";
+      let saved = false;
+      try {
+        const saveRes = await api(textURL(entry.path), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: editor.value,
+            modTime: savedModTime,
+          }),
+        });
+        const saveData = await saveRes.json().catch(() => ({}));
+        if (!saveRes.ok) {
+          throw new Error(saveData.error || `save failed: ${saveRes.status}`);
+        }
+        savedContent = editor.value;
+        savedModTime = saveData.modTime || "";
+        status.textContent = `${fmtSize(saveData.size || savedContent.length)} saved`;
+        saved = true;
+        await loadList();
+      } catch (err) {
+        status.textContent = err.message || String(err);
+      } finally {
+        editor.disabled = false;
+        if (saved) {
+          syncDirty();
+        } else {
+          saveBtn.disabled = false;
+          revertBtn.disabled = false;
+        }
+        editor.focus();
+      }
+    });
+
+    actions.appendChild(revertBtn);
+    actions.appendChild(openBtn);
+    actions.appendChild(saveBtn);
+    bar.appendChild(status);
+    bar.appendChild(actions);
+    viewerBody.appendChild(editor);
+    viewerBody.appendChild(bar);
+    syncDirty();
+    editor.focus();
+  } catch (err) {
+    viewerBody.classList.remove("viewerBodyText");
+    viewerBody.textContent = `Failed to load text: ${err.message || err}`;
+  }
 }
 
 function pauseThumbLoading(ms) {

@@ -9,6 +9,7 @@ Minimal remote file manager (Go backend + vanilla JS frontend).
 - Persistent login cookie when password auth is enabled (60 days)
 - Directory navigation from browser
 - File open/download
+- Built-in editor for `.md` and `.txt` files
 - Image and video thumbnails
 - Thumbnail cache directory (`--hist`)
 
@@ -25,7 +26,7 @@ go run ./cmd/rakuyo \
   -d /mnt \
   -d /mnt2 \
   --password foo \
-  --hist /home/oboro/.local/share/rakuyo/hist \
+  --hist /home/light/.local/share/rakuyo/hist \
   --addr :8080
 ```
 

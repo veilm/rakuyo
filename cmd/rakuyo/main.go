@@ -35,14 +35,18 @@ import (
 )
 
 const (
-	authCookieName     = "rakuyo_auth"
-	authCookieLifetime = 60 * 24 * time.Hour
-	authCookieMaxAge   = int(authCookieLifetime / time.Second)
+	authCookieName       = "rakuyo_auth"
+	authCookieLifetime   = 60 * 24 * time.Hour
+	authCookieMaxAge     = int(authCookieLifetime / time.Second)
+	editableTextMaxBytes = 2 * 1024 * 1024
 )
 
 var (
 	unixFilenamePattern = regexp.MustCompile(`^\d{10}(?:\D|$)`)
 	numericNotePattern  = regexp.MustCompile(`^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$`)
+	errTextNotEditable  = errors.New("only .md and .txt files can be edited")
+	errTextTooLarge     = errors.New("file is too large")
+	errTextNotFound     = errors.New("not found")
 )
 
 type multiStringFlag []string
@@ -256,6 +260,7 @@ func main() {
 	mux.HandleFunc("/api/roots", a.withAuth(a.handleRoots))
 	mux.HandleFunc("/api/list", a.withAuth(a.handleList))
 	mux.HandleFunc("/api/file", a.withAuth(a.handleFile))
+	mux.HandleFunc("/api/text", a.withAuth(a.handleText))
 	mux.HandleFunc("/api/media-note", a.withAuth(a.handleMediaNote))
 	mux.HandleFunc("/api/thumb", a.withAuth(a.handleThumb))
 	mux.HandleFunc("/api/video/probe", a.withAuth(a.handleVideoProbe))
@@ -504,6 +509,107 @@ func (a *app) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	http.ServeContent(w, r, filepath.Base(real), st.ModTime(), f)
+}
+
+func (a *app) handleText(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		a.handleTextGet(w, r)
+	case http.MethodPut:
+		a.handleTextPut(w, r)
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+	}
+}
+
+func (a *app) handleTextGet(w http.ResponseWriter, r *http.Request) {
+	_, _, _, real, err := a.resolveRequestPath(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	info, err := statEditableText(real)
+	if err != nil {
+		writeJSON(w, statusForTextError(err), map[string]any{"error": err.Error()})
+		return
+	}
+	data, err := os.ReadFile(real)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to read file"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"content": string(data),
+		"modTime": info.ModTime().Format(time.RFC3339Nano),
+		"size":    info.Size(),
+	})
+}
+
+func (a *app) handleTextPut(w http.ResponseWriter, r *http.Request) {
+	_, _, _, real, err := a.resolveRequestPath(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	info, err := statEditableText(real)
+	if err != nil {
+		writeJSON(w, statusForTextError(err), map[string]any{"error": err.Error()})
+		return
+	}
+
+	var req struct {
+		Content string `json:"content"`
+		ModTime string `json:"modTime"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, editableTextMaxBytes+1024)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if int64(len(req.Content)) > editableTextMaxBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "file is too large"})
+		return
+	}
+	if req.ModTime != "" && req.ModTime != info.ModTime().Format(time.RFC3339Nano) {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "file changed on disk; reload before saving"})
+		return
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(real), "."+filepath.Base(real)+".*.tmp")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to create temp file"})
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if _, err := io.WriteString(tmp, req.Content); err != nil {
+		tmp.Close()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to write file"})
+		return
+	}
+	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
+		tmp.Close()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to set file mode"})
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to close file"})
+		return
+	}
+	if err := os.Rename(tmpName, real); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to replace file"})
+		return
+	}
+	newInfo, err := os.Stat(real)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to stat saved file"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"modTime": newInfo.ModTime().Format(time.RFC3339Nano),
+		"size":    newInfo.Size(),
+	})
 }
 
 func (a *app) handleMediaNote(w http.ResponseWriter, r *http.Request) {
@@ -1459,6 +1565,33 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func statEditableText(real string) (os.FileInfo, error) {
+	if !isEditableTextExt(strings.ToLower(filepath.Ext(real))) {
+		return nil, errTextNotEditable
+	}
+	info, err := os.Stat(real)
+	if err != nil || info.IsDir() {
+		return nil, errTextNotFound
+	}
+	if info.Size() > editableTextMaxBytes {
+		return nil, errTextTooLarge
+	}
+	return info, nil
+}
+
+func statusForTextError(err error) int {
+	switch {
+	case errors.Is(err, errTextNotEditable):
+		return http.StatusBadRequest
+	case errors.Is(err, errTextTooLarge):
+		return http.StatusRequestEntityTooLarge
+	case errors.Is(err, errTextNotFound):
+		return http.StatusNotFound
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
 func deriveMediaNoteOutput(note string) (string, error) {
 	note = strings.TrimSpace(note)
 	if note == "" {
@@ -1687,6 +1820,15 @@ func isImageExt(ext string) bool {
 func isVideoExt(ext string) bool {
 	switch ext {
 	case ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts":
+		return true
+	default:
+		return false
+	}
+}
+
+func isEditableTextExt(ext string) bool {
+	switch ext {
+	case ".md", ".txt":
 		return true
 	default:
 		return false
