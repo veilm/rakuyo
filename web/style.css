@@ -406,6 +406,12 @@ body[data-theme="dark"] .gfolder {
   width: min(700px, 92vw);
 }
 
+.color-red { background: color-mix(in srgb, #ef4444 18%, transparent); }
+.color-blue { background: color-mix(in srgb, #3b82f6 18%, transparent); }
+.color-yellow { background: color-mix(in srgb, #eab308 22%, transparent); }
+.color-green { background: color-mix(in srgb, #22c55e 18%, transparent); }
+.colorSelect { margin-left: 0.5rem; font-size: 0.75rem; }
+
 .viewerBodyText {
   display: flex;
   flex-direction: column;

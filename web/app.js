@@ -10,6 +10,7 @@ const settings = {
   viewMode: "list",
   theme: "light",
   gridSize: 200,
+  autoColor: "none",
 };
 
 const loginPanel = document.getElementById("loginPanel");
@@ -28,6 +29,7 @@ const logoutBtn = document.getElementById("logoutBtn");
 const rowTemplate = document.getElementById("rowTemplate");
 const viewModeSelect = document.getElementById("viewModeSelect");
 const themeSelect = document.getElementById("themeSelect");
+const autoColorSelect = document.getElementById("autoColorSelect");
 const gridSizeInput = document.getElementById("gridSizeInput");
 const gridSizeValue = document.getElementById("gridSizeValue");
 const gridSizeCtl = document.querySelector(".gridSizeCtl");
@@ -70,6 +72,52 @@ function setCookie(name, value) {
   document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=31536000; SameSite=Lax`;
 }
 
+function loadCookieJSON(name, fallback) {
+  try {
+    const value = getCookie(name);
+    return value ? JSON.parse(value) : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function saveCookieJSON(name, value) {
+  setCookie(name, JSON.stringify(value));
+}
+
+const choiceMemory = loadCookieJSON("rakuyo_choice_memory", {});
+const fileColors = loadCookieJSON("rakuyo_file_colors", {});
+
+function optionSignature(values) {
+  return values.map((value) => String(value)).sort().join("|");
+}
+
+function rememberedChoice(kind, values, fallback) {
+  const key = `${kind}:${optionSignature(values)}`;
+  return Object.prototype.hasOwnProperty.call(choiceMemory, key) ? choiceMemory[key] : fallback;
+}
+
+function rememberChoice(kind, values, value) {
+  choiceMemory[`${kind}:${optionSignature(values)}`] = String(value);
+  saveCookieJSON("rakuyo_choice_memory", choiceMemory);
+}
+
+function fileKey(entry) {
+  return `${state.rootId}:${entry.path}`;
+}
+
+function colorForEntry(entry) {
+  return fileColors[fileKey(entry)] || "none";
+}
+
+function setEntryColor(entry, color) {
+  if (color === "none") delete fileColors[fileKey(entry)];
+  else fileColors[fileKey(entry)] = color;
+  saveCookieJSON("rakuyo_file_colors", fileColors);
+  renderList(state.entries);
+  renderGallery(state.entries);
+}
+
 function clamp(n, min, max) {
   return Math.min(max, Math.max(min, n));
 }
@@ -78,6 +126,7 @@ function loadSettingsFromCookies() {
   const viewMode = getCookie("rakuyo_view_mode");
   const theme = getCookie("rakuyo_theme");
   const gridSizeRaw = parseInt(getCookie("rakuyo_grid_size"), 10);
+  const autoColor = getCookie("rakuyo_auto_color");
 
   if (viewMode === "gallery" || viewMode === "list") {
     settings.viewMode = viewMode;
@@ -88,12 +137,15 @@ function loadSettingsFromCookies() {
   if (Number.isFinite(gridSizeRaw)) {
     settings.gridSize = clamp(gridSizeRaw, 60, 320);
   }
+  if (["none", "red", "blue", "yellow", "green"].includes(autoColor)) settings.autoColor = autoColor;
 }
 
 function applyTheme() {
   document.body.dataset.theme = settings.theme;
   themeSelect.value = settings.theme;
 }
+
+function applyAutoColor() { autoColorSelect.value = settings.autoColor; }
 
 function applyViewMode() {
   const gallery = settings.viewMode === "gallery";
@@ -143,6 +195,8 @@ function setURLFromState(replace) {
   const qs = new URLSearchParams();
   if (state.rootId !== null) qs.set("root", String(state.rootId));
   if (state.path) qs.set("path", state.path);
+  const file = new URLSearchParams(window.location.search).get("file");
+  if (file) qs.set("file", file);
   const query = qs.toString();
   const nextURL = query ? `${window.location.pathname}?${query}` : window.location.pathname;
   if (replace) {
@@ -152,12 +206,46 @@ function setURLFromState(replace) {
   }
 }
 
+function setURLFromViewer(entry, replace = false) {
+  const qs = new URLSearchParams(window.location.search);
+  qs.set("root", String(state.rootId));
+  qs.set("path", state.path);
+  qs.set("file", entry.path);
+  const nextURL = `${window.location.pathname}?${qs.toString()}`;
+  window.history[replace ? "replaceState" : "pushState"]({ rootId: state.rootId, path: state.path, file: entry.path }, "", nextURL);
+}
+
 function applyStateFromURL() {
   const qs = new URLSearchParams(window.location.search);
   const root = qs.get("root");
   const p = qs.get("path");
   state.rootId = root === null ? null : Number(root);
   state.path = p || "";
+}
+
+function viewerEntryFromURL() {
+  const file = new URLSearchParams(window.location.search).get("file");
+  return file ? state.entries.find((entry) => !entry.isDir && entry.path === file) : null;
+}
+
+function playbackKey(entry) { return `${state.rootId}:${entry.path}`; }
+function savedPlaybackPosition(entry) {
+  const positions = loadCookieJSON("rakuyo_playback_positions", {});
+  return Number(positions[playbackKey(entry)]) || 0;
+}
+function rememberPlaybackPosition(entry, media) {
+  if (!Number.isFinite(media.currentTime) || media.currentTime < 1) return;
+  const positions = loadCookieJSON("rakuyo_playback_positions", {});
+  positions[playbackKey(entry)] = media.currentTime;
+  saveCookieJSON("rakuyo_playback_positions", positions);
+}
+function attachPlaybackMemory(entry, media) {
+  media.addEventListener("loadedmetadata", () => {
+    const position = savedPlaybackPosition(entry);
+    if (position > 0 && (!media.duration || position < media.duration - 2)) media.currentTime = position;
+  });
+  media.addEventListener("timeupdate", () => rememberPlaybackPosition(entry, media));
+  media.addEventListener("pause", () => rememberPlaybackPosition(entry, media));
 }
 
 function fileURL(entryPath) {
@@ -272,12 +360,20 @@ function setupViewerNoteBar(entry) {
 }
 
 function closeViewer() {
+  const qs = new URLSearchParams(window.location.search);
+  qs.delete("file");
+  window.history.pushState({ rootId: state.rootId, path: state.path }, "", `${window.location.pathname}?${qs.toString()}`);
   clearViewer();
   resetViewerNoteBar();
   viewerModal.classList.add("hidden");
 }
 
 function openViewer(entry) {
+  setURLFromViewer(entry);
+  const mediaMime = (entry.mime || "").toLowerCase();
+  if (settings.autoColor !== "none" && (mediaMime.startsWith("video/") || mediaMime.startsWith("audio/") || entry.name.toLowerCase().endsWith(".mkv"))) {
+    setEntryColor(entry, settings.autoColor);
+  }
   setupViewerNoteBar(entry);
   if (isEditableTextEntry(entry)) {
     openTextEditor(entry);
@@ -308,6 +404,7 @@ function openViewer(entry) {
     audio.src = src;
     audio.controls = true;
     audio.autoplay = true;
+    attachPlaybackMemory(entry, audio);
     viewerBody.appendChild(audio);
   } else {
     const link = document.createElement("a");
@@ -478,6 +575,7 @@ function fallbackVideoViewer(entry, message) {
   video.autoplay = true;
   video.loop = true;
   video.preload = "metadata";
+  attachPlaybackMemory(entry, video);
   viewerBody.appendChild(video);
   if (message) {
     const hint = document.createElement("div");
@@ -530,6 +628,8 @@ async function openVideoViewer(entry) {
       if (!audioSelect.value && audioTracks[0]) {
         audioSelect.value = String(audioTracks[0].index);
       }
+      const audioMemory = audioTracks.map((a) => `${a.index}:${trackLabel(a)}`);
+      audioSelect.value = rememberedChoice("video-audio", audioMemory, audioSelect.value);
       audioLabel.appendChild(audioSelect);
       controls.appendChild(audioLabel);
     }
@@ -550,6 +650,7 @@ async function openVideoViewer(entry) {
     } else {
       modeSelect.value = "native";
     }
+    modeSelect.value = rememberedChoice("video-mode", [...modeSelect.options].map((o) => o.value), modeSelect.value);
     modeLabel.appendChild(modeSelect);
     controls.appendChild(modeLabel);
 
@@ -563,6 +664,7 @@ async function openVideoViewer(entry) {
     video.loop = true;
     video.preload = "metadata";
     video.className = "mkvVideo";
+    attachPlaybackMemory(entry, video);
 
     const setPlayback = () => {
       const mode = modeSelect.value;
@@ -586,11 +688,13 @@ async function openVideoViewer(entry) {
 
     if (audioSelect) {
       audioSelect.addEventListener("change", () => {
+        rememberChoice("video-audio", audioMemory, audioSelect.value);
         pauseThumbLoading(1500);
         setPlayback();
       });
     }
     modeSelect.addEventListener("change", () => {
+      rememberChoice("video-mode", [...modeSelect.options].map((o) => o.value), modeSelect.value);
       pauseThumbLoading(1500);
       setPlayback();
     });
@@ -644,6 +748,8 @@ async function openMKVViewer(entry) {
     if (!audioSelect.value && audioTracks[0]) {
       audioSelect.value = String(audioTracks[0].index);
     }
+    const audioMemory = audioTracks.map((a) => `${a.index}:${trackLabel(a)}`);
+    audioSelect.value = rememberedChoice("mkv-audio", audioMemory, audioSelect.value);
     audioLabel.appendChild(audioSelect);
 
     const subLabel = document.createElement("label");
@@ -662,6 +768,8 @@ async function openMKVViewer(entry) {
         subSelect.value = String(s.index);
       }
     }
+    const subtitleMemory = subTracks.map((s) => `${s.index}:${trackLabel(s)}`).concat(["off"]);
+    subSelect.value = rememberedChoice("mkv-subtitle", subtitleMemory, subSelect.value);
     subLabel.appendChild(subSelect);
 
     const modeLabel = document.createElement("label");
@@ -676,6 +784,7 @@ async function openMKVViewer(entry) {
     modeSelect.appendChild(nativeOpt);
     modeSelect.appendChild(remuxOpt);
     modeSelect.value = remuxLikelyPlayable ? "remux" : "native";
+    modeSelect.value = rememberedChoice("mkv-mode", ["native", "remux"], modeSelect.value);
     modeLabel.appendChild(modeSelect);
 
     const hint = document.createElement("div");
@@ -688,6 +797,7 @@ async function openMKVViewer(entry) {
     video.loop = true;
     video.preload = "metadata";
     video.className = "mkvVideo";
+    attachPlaybackMemory(entry, video);
 
     const setPlayback = () => {
       const audioIndex = audioSelect.value;
@@ -716,14 +826,17 @@ async function openMKVViewer(entry) {
     };
 
     audioSelect.addEventListener("change", () => {
+      rememberChoice("mkv-audio", audioMemory, audioSelect.value);
       pauseThumbLoading(1500);
       setPlayback();
     });
     subSelect.addEventListener("change", () => {
+      rememberChoice("mkv-subtitle", subtitleMemory, subSelect.value);
       pauseThumbLoading(1500);
       setPlayback();
     });
     modeSelect.addEventListener("change", () => {
+      rememberChoice("mkv-mode", ["native", "remux"], modeSelect.value);
       pauseThumbLoading(1500);
       setPlayback();
     });
@@ -756,6 +869,23 @@ function setupEntryClick(link, entry) {
       openViewer(entry);
     }
   });
+}
+
+function addColorControl(container, entry) {
+  if (entry.isDir) return;
+  const select = document.createElement("select");
+  select.className = "colorSelect";
+  select.title = "Mark color";
+  for (const color of ["none", "red", "blue", "yellow", "green"]) {
+    const option = document.createElement("option");
+    option.value = color;
+    option.textContent = color === "none" ? "No color" : color[0].toUpperCase() + color.slice(1);
+    select.appendChild(option);
+  }
+  select.value = colorForEntry(entry);
+  select.addEventListener("click", (event) => event.stopPropagation());
+  select.addEventListener("change", () => setEntryColor(entry, select.value));
+  container.appendChild(select);
 }
 
 function ensureThumbObserver() {
@@ -860,6 +990,8 @@ function renderList(entries) {
 
     link.textContent = entry.name;
     setupEntryClick(link, entry);
+    node.classList.add(`color-${colorForEntry(entry)}`);
+    addColorControl(node.querySelector(".nameCell"), entry);
 
     node.querySelector(".typeCell").textContent = entry.isDir ? "dir" : entry.mime || "file";
     node.querySelector(".sizeCell").textContent = entry.isDir ? "-" : fmtSize(entry.size);
@@ -903,6 +1035,7 @@ function renderGallery(entries) {
 
     const card = document.createElement("div");
     card.className = "gcard";
+    card.classList.add(`color-${colorForEntry(entry)}`);
 
     if (entry.isDir) {
       const folder = document.createElement("div");
@@ -924,6 +1057,7 @@ function renderGallery(entries) {
     label.className = `glabel ${entry.isDir ? "glabel-dir" : ""}`.trim();
     label.textContent = entry.name;
     card.appendChild(label);
+    addColorControl(card, entry);
 
     link.appendChild(card);
     galleryEntriesEl.appendChild(link);
@@ -1049,6 +1183,11 @@ themeSelect.addEventListener("change", () => {
   applyTheme();
 });
 
+autoColorSelect.addEventListener("change", () => {
+  settings.autoColor = autoColorSelect.value;
+  setCookie("rakuyo_auto_color", settings.autoColor);
+});
+
 gridSizeInput.addEventListener("input", () => {
   settings.gridSize = clamp(parseInt(gridSizeInput.value, 10) || 200, 60, 320);
   setCookie("rakuyo_grid_size", String(settings.gridSize));
@@ -1107,11 +1246,14 @@ window.addEventListener("popstate", async () => {
   applyStateFromURL();
   await loadRoots();
   await loadList();
+  const entry = viewerEntryFromURL();
+  if (entry) openViewer(entry);
 });
 
 (function init() {
   loadSettingsFromCookies();
   applyTheme();
+  applyAutoColor();
   applyGridSize();
   applyViewMode();
 })();
@@ -1122,6 +1264,8 @@ window.addEventListener("popstate", async () => {
     const ok = await loadRoots();
     if (ok) {
       await loadList({ replaceURL: true });
+      const entry = viewerEntryFromURL();
+      if (entry) openViewer(entry);
     }
   } catch (err) {
     console.error(err);
