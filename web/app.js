@@ -85,8 +85,54 @@ function saveCookieJSON(name, value) {
   setCookie(name, JSON.stringify(value));
 }
 
+let dataStorage = "frontend";
 const choiceMemory = loadCookieJSON("rakuyo_choice_memory", {});
 const fileColors = loadCookieJSON("rakuyo_file_colors", {});
+const playbackPositions = loadCookieJSON("rakuyo_playback_positions", {});
+const playbackWriteTimes = new Map();
+
+const dataCookies = {
+  choiceMemory: "rakuyo_choice_memory",
+  fileColors: "rakuyo_file_colors",
+  playbackPositions: "rakuyo_playback_positions",
+};
+
+function replaceObject(target, source) {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, source || {});
+}
+
+async function loadDataStorage() {
+  const res = await api("/api/data");
+  if (!res.ok) throw new Error(`data failed: ${res.status}`);
+  const response = await res.json();
+  dataStorage = response.storage === "backend" ? "backend" : "frontend";
+  if (dataStorage === "backend") {
+    const data = response.data || {};
+    replaceObject(choiceMemory, data.choiceMemory);
+    replaceObject(fileColors, data.fileColors);
+    replaceObject(playbackPositions, data.playbackPositions);
+  }
+}
+
+function persistDataValue(section, key, value) {
+  if (dataStorage === "frontend") {
+    saveCookieJSON(dataCookies[section], {
+      choiceMemory,
+      fileColors,
+      playbackPositions,
+    }[section]);
+    return;
+  }
+  api("/api/data", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ section, key, value }),
+    keepalive: true,
+  }).then((res) => {
+    if (!res.ok) console.error(`Failed to save ${section}: ${res.status}`);
+  }).catch((err) => console.error(`Failed to save ${section}:`, err));
+}
 
 function optionSignature(values) {
   return values.map((value) => String(value)).sort().join("|");
@@ -98,8 +144,9 @@ function rememberedChoice(kind, values, fallback) {
 }
 
 function rememberChoice(kind, values, value) {
-  choiceMemory[`${kind}:${optionSignature(values)}`] = String(value);
-  saveCookieJSON("rakuyo_choice_memory", choiceMemory);
+  const key = `${kind}:${optionSignature(values)}`;
+  choiceMemory[key] = String(value);
+  persistDataValue("choiceMemory", key, choiceMemory[key]);
 }
 
 function fileKey(entry) {
@@ -111,9 +158,10 @@ function colorForEntry(entry) {
 }
 
 function setEntryColor(entry, color) {
-  if (color === "none") delete fileColors[fileKey(entry)];
-  else fileColors[fileKey(entry)] = color;
-  saveCookieJSON("rakuyo_file_colors", fileColors);
+  const key = fileKey(entry);
+  if (color === "none") delete fileColors[key];
+  else fileColors[key] = color;
+  persistDataValue("fileColors", key, color === "none" ? null : color);
   renderList(state.entries);
   renderGallery(state.entries);
 }
@@ -230,14 +278,16 @@ function viewerEntryFromURL() {
 
 function playbackKey(entry) { return `${state.rootId}:${entry.path}`; }
 function savedPlaybackPosition(entry) {
-  const positions = loadCookieJSON("rakuyo_playback_positions", {});
-  return Number(positions[playbackKey(entry)]) || 0;
+  return Number(playbackPositions[playbackKey(entry)]) || 0;
 }
-function rememberPlaybackPosition(entry, media) {
+function rememberPlaybackPosition(entry, media, force = false) {
   if (!Number.isFinite(media.currentTime) || media.currentTime < 1) return;
-  const positions = loadCookieJSON("rakuyo_playback_positions", {});
-  positions[playbackKey(entry)] = media.currentTime;
-  saveCookieJSON("rakuyo_playback_positions", positions);
+  const key = playbackKey(entry);
+  const now = Date.now();
+  if (!force && now - (playbackWriteTimes.get(key) || 0) < 5000) return;
+  playbackWriteTimes.set(key, now);
+  playbackPositions[key] = media.currentTime;
+  persistDataValue("playbackPositions", key, media.currentTime);
 }
 function attachPlaybackMemory(entry, media) {
   media.addEventListener("loadedmetadata", () => {
@@ -245,7 +295,7 @@ function attachPlaybackMemory(entry, media) {
     if (position > 0 && (!media.duration || position < media.duration - 2)) media.currentTime = position;
   });
   media.addEventListener("timeupdate", () => rememberPlaybackPosition(entry, media));
-  media.addEventListener("pause", () => rememberPlaybackPosition(entry, media));
+  media.addEventListener("pause", () => rememberPlaybackPosition(entry, media, true));
 }
 
 function fileURL(entryPath) {
@@ -1151,6 +1201,7 @@ loginForm.addEventListener("submit", async (e) => {
   passwordInput.value = "";
   const ok = await loadRoots();
   if (ok) {
+    await loadDataStorage();
     await loadList({ replaceURL: true });
   }
 });
@@ -1244,7 +1295,9 @@ window.addEventListener("keydown", (e) => {
 });
 window.addEventListener("popstate", async () => {
   applyStateFromURL();
-  await loadRoots();
+  const ok = await loadRoots();
+  if (!ok) return;
+  await loadDataStorage();
   await loadList();
   const entry = viewerEntryFromURL();
   if (entry) openViewer(entry);
@@ -1263,6 +1316,7 @@ window.addEventListener("popstate", async () => {
     applyStateFromURL();
     const ok = await loadRoots();
     if (ok) {
+      await loadDataStorage();
       await loadList({ replaceURL: true });
       const entry = viewerEntryFromURL();
       if (entry) openViewer(entry);

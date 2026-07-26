@@ -72,10 +72,28 @@ type app struct {
 	histDir               string
 	password              string
 	authToken             string
+	dataStorage           string
+	dataPath              string
+	dataMu                sync.Mutex
+	data                  persistentData
 	thumbMu               sync.Map
 	thumbSem              chan struct{}
 	remuxSem              chan struct{}
 	interactiveUntilNanos atomic.Int64
+}
+
+type persistentData struct {
+	FileColors        map[string]string  `json:"fileColors"`
+	PlaybackPositions map[string]float64 `json:"playbackPositions"`
+	ChoiceMemory      map[string]string  `json:"choiceMemory"`
+}
+
+func newPersistentData() persistentData {
+	return persistentData{
+		FileColors:        make(map[string]string),
+		PlaybackPositions: make(map[string]float64),
+		ChoiceMemory:      make(map[string]string),
+	}
 }
 
 type statusRecorder struct {
@@ -177,12 +195,18 @@ func main() {
 	var addr string
 	var password string
 	var hist string
+	var dataStorage string
 
 	flag.Var(&dirs, "d", "host path to expose (repeatable)")
 	flag.StringVar(&addr, "addr", ":7111", "listen address")
 	flag.StringVar(&password, "password", "", "optional shared password")
 	flag.StringVar(&hist, "hist", "", "thumbnail cache directory")
+	flag.StringVar(&dataStorage, "data", "frontend", "state storage location: frontend or backend")
 	flag.Parse()
+
+	if dataStorage != "frontend" && dataStorage != "backend" {
+		log.Fatalf("invalid --data %q: must be frontend or backend", dataStorage)
+	}
 
 	if len(dirs) == 0 {
 		cwd, err := os.Getwd()
@@ -192,16 +216,12 @@ func main() {
 		dirs = append(dirs, cwd)
 	}
 
+	dataHome, err := userDataHome()
+	if err != nil {
+		log.Fatalf("failed to determine user data directory: %v", err)
+	}
 	if hist == "" {
-		xdgDataHome := os.Getenv("XDG_DATA_HOME")
-		if xdgDataHome == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				log.Fatalf("failed to determine home directory for default --hist: %v", err)
-			}
-			xdgDataHome = filepath.Join(home, ".local", "share")
-		}
-		hist = filepath.Join(xdgDataHome, "rakuyo", "hist")
+		hist = filepath.Join(dataHome, "rakuyo", "hist")
 	}
 
 	histPath, err := expandPath(hist)
@@ -243,11 +263,19 @@ func main() {
 	}
 
 	a := &app{
-		roots:    roots,
-		histDir:  histPath,
-		password: password,
-		thumbSem: make(chan struct{}, 2),
-		remuxSem: make(chan struct{}, 1),
+		roots:       roots,
+		histDir:     histPath,
+		password:    password,
+		dataStorage: dataStorage,
+		data:        newPersistentData(),
+		thumbSem:    make(chan struct{}, 2),
+		remuxSem:    make(chan struct{}, 1),
+	}
+	if dataStorage == "backend" {
+		a.dataPath = filepath.Join(dataHome, "rakuyo", "state.json")
+		if err := a.loadData(); err != nil {
+			log.Fatalf("failed to load backend data: %v", err)
+		}
 	}
 	if password != "" {
 		tok := sha256.Sum256([]byte("rakuyo|" + password))
@@ -257,6 +285,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/login", a.handleLogin)
 	mux.HandleFunc("/api/logout", a.handleLogout)
+	mux.HandleFunc("/api/data", a.withAuth(a.handleData))
 	mux.HandleFunc("/api/roots", a.withAuth(a.handleRoots))
 	mux.HandleFunc("/api/list", a.withAuth(a.handleList))
 	mux.HandleFunc("/api/file", a.withAuth(a.handleFile))
@@ -282,6 +311,11 @@ func main() {
 		log.Printf("root %d: %s (%s)", rt.ID, rt.Path, rt.Name)
 	}
 	log.Printf("thumb cache: %s", histPath)
+	if dataStorage == "backend" {
+		log.Printf("data storage: backend (%s)", a.dataPath)
+	} else {
+		log.Printf("data storage: frontend")
+	}
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		log.Printf("warning: ffmpeg not found, video thumbnails and remux playback will fail: %v", err)
 	}
@@ -376,6 +410,151 @@ func (a *app) newAuthCookie(value string, expires time.Time) *http.Cookie {
 
 func (a *app) handleRoots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"roots": a.roots})
+}
+
+func (a *app) handleData(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		a.dataMu.Lock()
+		defer a.dataMu.Unlock()
+		resp := map[string]any{"storage": a.dataStorage}
+		if a.dataStorage == "backend" {
+			resp["data"] = a.data
+		}
+		writeJSON(w, http.StatusOK, resp)
+	case http.MethodPatch:
+		if a.dataStorage != "backend" {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "backend data storage is disabled"})
+			return
+		}
+		a.patchData(w, r)
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+	}
+}
+
+func (a *app) patchData(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Section string          `json:"section"`
+		Key     string          `json:"key"`
+		Value   json.RawMessage `json:"value"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.Key == "" || len(req.Key) > 4096 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid key"})
+		return
+	}
+
+	a.dataMu.Lock()
+	defer a.dataMu.Unlock()
+
+	if err := a.applyDataPatch(req.Section, req.Key, req.Value); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := a.saveDataLocked(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to save data"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *app) applyDataPatch(section, key string, raw json.RawMessage) error {
+	remove := string(raw) == "null"
+	switch section {
+	case "fileColors":
+		if remove {
+			delete(a.data.FileColors, key)
+			return nil
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return errors.New("invalid file color")
+		}
+		switch value {
+		case "red", "blue", "yellow", "green":
+			a.data.FileColors[key] = value
+			return nil
+		default:
+			return errors.New("invalid file color")
+		}
+	case "playbackPositions":
+		if remove {
+			delete(a.data.PlaybackPositions, key)
+			return nil
+		}
+		var value float64
+		if err := json.Unmarshal(raw, &value); err != nil || value < 0 {
+			return errors.New("invalid playback position")
+		}
+		a.data.PlaybackPositions[key] = value
+		return nil
+	case "choiceMemory":
+		if remove {
+			delete(a.data.ChoiceMemory, key)
+			return nil
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil || len(value) > 4096 {
+			return errors.New("invalid remembered choice")
+		}
+		a.data.ChoiceMemory[key] = value
+		return nil
+	default:
+		return errors.New("invalid data section")
+	}
+}
+
+func (a *app) loadData() error {
+	data, err := os.ReadFile(a.dataPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, &a.data); err != nil {
+		return fmt.Errorf("%s: %w", a.dataPath, err)
+	}
+	if a.data.FileColors == nil {
+		a.data.FileColors = make(map[string]string)
+	}
+	if a.data.PlaybackPositions == nil {
+		a.data.PlaybackPositions = make(map[string]float64)
+	}
+	if a.data.ChoiceMemory == nil {
+		a.data.ChoiceMemory = make(map[string]string)
+	}
+	return nil
+}
+
+func (a *app) saveDataLocked() error {
+	if err := os.MkdirAll(filepath.Dir(a.dataPath), 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(a.dataPath), ".state-*.json")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(a.data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, a.dataPath)
 }
 
 func (a *app) handleList(w http.ResponseWriter, r *http.Request) {
@@ -1563,6 +1742,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func userDataHome() (string, error) {
+	if dataHome := os.Getenv("XDG_DATA_HOME"); dataHome != "" {
+		return dataHome, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "share"), nil
 }
 
 func statEditableText(real string) (os.FileInfo, error) {
