@@ -7,38 +7,16 @@
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%92%AE%3C/text%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/static/style.css" />
   </head>
-  <body>
+  <body data-theme="dark">
     <header class="topbar">
       <div>
         <h1>Rakuyo</h1>
         <div id="location"></div>
       </div>
       <div class="topbar-actions">
-        <select id="viewModeSelect" title="View mode">
-          <option value="list">List</option>
-          <option value="gallery">Gallery</option>
-        </select>
-        <select id="themeSelect" title="Theme">
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-        </select>
-        <label>Auto-mark
-          <select id="autoColorSelect" title="Automatically mark opened videos">
-            <option value="none">None</option>
-            <option value="red">Red</option>
-            <option value="blue">Blue</option>
-            <option value="yellow">Yellow</option>
-            <option value="green">Green</option>
-          </select>
-        </label>
-        <label class="gridSizeCtl" for="gridSizeInput">
-          Size
-          <input id="gridSizeInput" type="range" min="60" max="320" step="20" />
-          <span id="gridSizeValue"></span>
-        </label>
         <select id="rootSelect"></select>
         <button id="upBtn" type="button">Up</button>
-        <button id="logoutBtn" type="button">Logout</button>
+        <a class="buttonLink" href="/settings" target="_blank" rel="noopener">Settings</a>
       </div>
     </header>
 

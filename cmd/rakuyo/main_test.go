@@ -64,6 +64,29 @@ func TestHandleFilePreservesFilenameForBrowserSave(t *testing.T) {
 	}
 }
 
+func TestConfigReportsMarkingCapability(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
+			a := &app{markingEnabled: enabled}
+			rec := httptest.NewRecorder()
+			a.handleConfig(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET returned %d: %s", rec.Code, rec.Body.String())
+			}
+			var config struct {
+				Marking bool `json:"marking"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &config); err != nil {
+				t.Fatal(err)
+			}
+			if config.Marking != enabled {
+				t.Errorf("marking = %v, want %v", config.Marking, enabled)
+			}
+		})
+	}
+}
+
 func TestBackendDataPersists(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "rakuyo", "state.json")
 	a := &app{

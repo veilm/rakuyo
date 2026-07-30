@@ -8,10 +8,11 @@ const state = {
 
 const settings = {
   viewMode: "list",
-  theme: "light",
+  theme: "dark",
   gridSize: 200,
   autoColor: "none",
 };
+let markingEnabled = false;
 
 const loginPanel = document.getElementById("loginPanel");
 const browserPanel = document.getElementById("browserPanel");
@@ -25,14 +26,7 @@ const listWrap = document.getElementById("listWrap");
 const galleryWrap = document.getElementById("galleryWrap");
 const locationEl = document.getElementById("location");
 const upBtn = document.getElementById("upBtn");
-const logoutBtn = document.getElementById("logoutBtn");
 const rowTemplate = document.getElementById("rowTemplate");
-const viewModeSelect = document.getElementById("viewModeSelect");
-const themeSelect = document.getElementById("themeSelect");
-const autoColorSelect = document.getElementById("autoColorSelect");
-const gridSizeInput = document.getElementById("gridSizeInput");
-const gridSizeValue = document.getElementById("gridSizeValue");
-const gridSizeCtl = document.querySelector(".gridSizeCtl");
 const viewerModal = document.getElementById("viewerModal");
 const viewerBody = document.getElementById("viewerBody");
 const viewerTitle = document.getElementById("viewerTitle");
@@ -115,6 +109,13 @@ async function loadDataStorage() {
   }
 }
 
+async function loadConfig() {
+  const res = await api("/api/config");
+  if (!res.ok) throw new Error(`config failed: ${res.status}`);
+  const config = await res.json();
+  markingEnabled = config.marking === true;
+}
+
 function persistDataValue(section, key, value) {
   if (dataStorage === "frontend") {
     saveCookieJSON(dataCookies[section], {
@@ -154,10 +155,12 @@ function fileKey(entry) {
 }
 
 function colorForEntry(entry) {
+  if (!markingEnabled) return "none";
   return fileColors[fileKey(entry)] || "none";
 }
 
 function setEntryColor(entry, color) {
+  if (!markingEnabled) return;
   const key = fileKey(entry);
   if (color === "none") delete fileColors[key];
   else fileColors[key] = color;
@@ -190,23 +193,25 @@ function loadSettingsFromCookies() {
 
 function applyTheme() {
   document.body.dataset.theme = settings.theme;
-  themeSelect.value = settings.theme;
 }
-
-function applyAutoColor() { autoColorSelect.value = settings.autoColor; }
 
 function applyViewMode() {
   const gallery = settings.viewMode === "gallery";
-  viewModeSelect.value = settings.viewMode;
   listWrap.classList.toggle("hidden", gallery);
   galleryWrap.classList.toggle("hidden", !gallery);
-  gridSizeCtl.classList.toggle("hidden", !gallery);
 }
 
 function applyGridSize() {
   galleryEntriesEl.style.setProperty("--grid-size", `${settings.gridSize}px`);
-  gridSizeInput.value = String(settings.gridSize);
-  gridSizeValue.textContent = `${settings.gridSize}`;
+}
+
+function reloadSettings() {
+  loadSettingsFromCookies();
+  applyTheme();
+  applyGridSize();
+  applyViewMode();
+  renderList(state.entries);
+  renderGallery(state.entries);
 }
 
 function fmtSize(bytes) {
@@ -421,7 +426,7 @@ function closeViewer() {
 function openViewer(entry) {
   setURLFromViewer(entry);
   const mediaMime = (entry.mime || "").toLowerCase();
-  if (settings.autoColor !== "none" && (mediaMime.startsWith("video/") || mediaMime.startsWith("audio/") || entry.name.toLowerCase().endsWith(".mkv"))) {
+  if (markingEnabled && settings.autoColor !== "none" && (mediaMime.startsWith("video/") || mediaMime.startsWith("audio/") || entry.name.toLowerCase().endsWith(".mkv"))) {
     setEntryColor(entry, settings.autoColor);
   }
   setupViewerNoteBar(entry);
@@ -922,7 +927,7 @@ function setupEntryClick(link, entry) {
 }
 
 function addColorControl(container, entry) {
-  if (entry.isDir) return;
+  if (!markingEnabled || entry.isDir) return;
   const select = document.createElement("select");
   select.className = "colorSelect";
   select.title = "Mark color";
@@ -1201,6 +1206,7 @@ loginForm.addEventListener("submit", async (e) => {
   passwordInput.value = "";
   const ok = await loadRoots();
   if (ok) {
+    await loadConfig();
     await loadDataStorage();
     await loadList({ replaceURL: true });
   }
@@ -1215,37 +1221,6 @@ rootSelect.addEventListener("change", async () => {
 upBtn.addEventListener("click", async () => {
   state.path = parentPath(state.path);
   await loadList({ pushURL: true });
-});
-
-logoutBtn.addEventListener("click", async () => {
-  await api("/api/logout", { method: "POST" });
-  setVisible(false);
-});
-
-viewModeSelect.addEventListener("change", () => {
-  settings.viewMode = viewModeSelect.value === "gallery" ? "gallery" : "list";
-  setCookie("rakuyo_view_mode", settings.viewMode);
-  applyViewMode();
-});
-
-themeSelect.addEventListener("change", () => {
-  settings.theme = themeSelect.value === "dark" ? "dark" : "light";
-  setCookie("rakuyo_theme", settings.theme);
-  applyTheme();
-});
-
-autoColorSelect.addEventListener("change", () => {
-  settings.autoColor = autoColorSelect.value;
-  setCookie("rakuyo_auto_color", settings.autoColor);
-});
-
-gridSizeInput.addEventListener("input", () => {
-  settings.gridSize = clamp(parseInt(gridSizeInput.value, 10) || 200, 60, 320);
-  setCookie("rakuyo_grid_size", String(settings.gridSize));
-  applyGridSize();
-  if (settings.viewMode === "gallery") {
-    renderGallery(state.entries);
-  }
 });
 
 viewerNoteForm.addEventListener("submit", async (e) => {
@@ -1306,16 +1281,21 @@ window.addEventListener("popstate", async () => {
 (function init() {
   loadSettingsFromCookies();
   applyTheme();
-  applyAutoColor();
   applyGridSize();
   applyViewMode();
 })();
+
+window.addEventListener("storage", (event) => {
+  if (event.key === "rakuyo_settings_changed") reloadSettings();
+});
+window.addEventListener("focus", reloadSettings);
 
 (async function initData() {
   try {
     applyStateFromURL();
     const ok = await loadRoots();
     if (ok) {
+      await loadConfig();
       await loadDataStorage();
       await loadList({ replaceURL: true });
       const entry = viewerEntryFromURL();

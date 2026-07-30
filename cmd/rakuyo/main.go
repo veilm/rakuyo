@@ -80,6 +80,7 @@ type app struct {
 	thumbMu               sync.Map
 	thumbSem              chan struct{}
 	remuxSem              chan struct{}
+	markingEnabled        bool
 	interactiveUntilNanos atomic.Int64
 }
 
@@ -197,12 +198,14 @@ func main() {
 	var password string
 	var hist string
 	var dataStorage string
+	var markingEnabled bool
 
 	flag.Var(&dirs, "d", "host path to expose (repeatable)")
 	flag.StringVar(&addr, "addr", ":7111", "listen address")
 	flag.StringVar(&password, "password", "", "optional shared password")
 	flag.StringVar(&hist, "hist", "", "thumbnail cache directory")
 	flag.StringVar(&dataStorage, "data", "frontend", "state storage location: frontend or backend")
+	flag.BoolVar(&markingEnabled, "marking", false, "enable per-file color marking and automatic marking")
 	flag.Parse()
 
 	if dataStorage != "frontend" && dataStorage != "backend" {
@@ -264,13 +267,14 @@ func main() {
 	}
 
 	a := &app{
-		roots:       roots,
-		histDir:     histPath,
-		password:    password,
-		dataStorage: dataStorage,
-		data:        newPersistentData(),
-		thumbSem:    make(chan struct{}, 2),
-		remuxSem:    make(chan struct{}, 1),
+		roots:          roots,
+		histDir:        histPath,
+		password:       password,
+		dataStorage:    dataStorage,
+		data:           newPersistentData(),
+		thumbSem:       make(chan struct{}, 2),
+		remuxSem:       make(chan struct{}, 1),
+		markingEnabled: markingEnabled,
 	}
 	if dataStorage == "backend" {
 		a.dataPath = filepath.Join(dataHome, "rakuyo", "state.json")
@@ -287,6 +291,7 @@ func main() {
 	mux.HandleFunc("/api/login", a.handleLogin)
 	mux.HandleFunc("/api/logout", a.handleLogout)
 	mux.HandleFunc("/api/data", a.withAuth(a.handleData))
+	mux.HandleFunc("/api/config", a.withAuth(a.handleConfig))
 	mux.HandleFunc("/api/roots", a.withAuth(a.handleRoots))
 	mux.HandleFunc("/api/list", a.withAuth(a.handleList))
 	mux.HandleFunc("/api/file", a.withAuth(a.handleFile))
@@ -299,6 +304,9 @@ func main() {
 	mux.HandleFunc("/api/mkv/play", a.withAuth(a.handleMKVPlay))
 	mux.HandleFunc("/api/mkv/sub", a.withAuth(a.handleMKVSub))
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("web"))))
+	mux.HandleFunc("/settings", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, filepath.Join("web", "settings.html"))
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -312,6 +320,7 @@ func main() {
 		log.Printf("root %d: %s (%s)", rt.ID, rt.Path, rt.Name)
 	}
 	log.Printf("thumb cache: %s", histPath)
+	log.Printf("marking: %s", map[bool]string{true: "enabled", false: "disabled"}[markingEnabled])
 	if dataStorage == "backend" {
 		log.Printf("data storage: backend (%s)", a.dataPath)
 	} else {
@@ -432,6 +441,10 @@ func (a *app) handleData(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 	}
+}
+
+func (a *app) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"marking": a.markingEnabled})
 }
 
 func (a *app) patchData(w http.ResponseWriter, r *http.Request) {

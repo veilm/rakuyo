@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rakuyo Settings</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body data-theme="dark" class="settingsPage">
+    <main class="settingsMain">
+      <section class="panel settingsPanel">
+        <div class="settingsHeading">
+          <div>
+            <h1>Rakuyo Settings</h1>
+            <p>Changes apply to open Rakuyo tabs.</p>
+          </div>
+          <a class="buttonLink" href="/">Open Rakuyo</a>
+        </div>
+
+        <label class="settingRow">
+          <span>View</span>
+          <select id="viewModeSelect">
+            <option value="list">List</option>
+            <option value="gallery">Gallery</option>
+          </select>
+        </label>
+        <label class="settingRow">
+          <span>Theme</span>
+          <select id="themeSelect">
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+          </select>
+        </label>
+        <label id="gridSizeRow" class="settingRow">
+          <span>Gallery size</span>
+          <span class="rangeSetting">
+            <input id="gridSizeInput" type="range" min="60" max="320" step="20" />
+            <span id="gridSizeValue"></span>
+          </span>
+        </label>
+        <label id="autoMarkRow" class="settingRow hidden">
+          <span>Automatically mark opened media</span>
+          <select id="autoColorSelect">
+            <option value="none">None</option>
+            <option value="red">Red</option>
+            <option value="blue">Blue</option>
+            <option value="yellow">Yellow</option>
+            <option value="green">Green</option>
+          </select>
+        </label>
+
+        <div class="settingsFooter">
+          <span id="settingsStatus"></span>
+          <button id="logoutBtn" type="button">Logout</button>
+        </div>
+      </section>
+    </main>
+    <script src="/static/settings.js"></script>
+  </body>
+</html>

@@ -29,6 +29,7 @@ go run ./cmd/rakuyo \
   --password foo \
   --hist /home/light/.local/share/rakuyo/hist \
   --data backend \
+  --marking \
   --addr :8080
 ```
 
@@ -44,3 +45,6 @@ media choices are stored:
 - `--data backend` stores it in
   `$XDG_DATA_HOME/rakuyo/state.json` (or
   `~/.local/share/rakuyo/state.json`) so every client of the server shares it.
+
+Color marking is disabled by default. Pass `--marking` to enable per-file color
+controls and the automatic marking setting.
