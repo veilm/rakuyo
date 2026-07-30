@@ -1,13 +1,68 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"mime"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestGenerateImageThumbFromWebP(t *testing.T) {
+	const webPBase64 = "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoCAAIAAgA0JaACdLoB+AADsAD+8Oj3/yC5YXXI1/8gP+QH/ID/+PIAAAA="
+
+	src := filepath.Join(t.TempDir(), "source.webp")
+	dst := filepath.Join(t.TempDir(), "thumb.jpg")
+	data, err := base64.StdEncoding.DecodeString(webPBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := generateImageThumb(context.Background(), src, dst, 256); err != nil {
+		t.Fatalf("generate WebP thumbnail: %v", err)
+	}
+	if info, err := os.Stat(dst); err != nil {
+		t.Fatalf("stat generated thumbnail: %v", err)
+	} else if info.Size() == 0 {
+		t.Fatal("generated thumbnail is empty")
+	}
+}
+
+func TestHandleFilePreservesFilenameForBrowserSave(t *testing.T) {
+	rootDir := t.TempDir()
+	filename := "host image.webp"
+	if err := os.WriteFile(filepath.Join(rootDir, filename), []byte("image data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{roots: []rootMount{{ID: 0, Path: rootDir, Real: rootDir}}}
+	req := httptest.NewRequest(http.MethodGet, "/api/file?root=0&path="+url.QueryEscape(filename), nil)
+	rec := httptest.NewRecorder()
+
+	a.handleFile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET returned %d: %s", rec.Code, rec.Body.String())
+	}
+	disposition, params, err := mime.ParseMediaType(rec.Header().Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("parse Content-Disposition: %v", err)
+	}
+	if disposition != "inline" {
+		t.Errorf("disposition = %q, want inline", disposition)
+	}
+	if got := params["filename"]; got != filename {
+		t.Errorf("filename = %q, want %q", got, filename)
+	}
+}
 
 func TestBackendDataPersists(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "rakuyo", "state.json")

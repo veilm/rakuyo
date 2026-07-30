@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"golang.org/x/image/draw"
+	_ "golang.org/x/image/webp"
 )
 
 const (
@@ -687,6 +688,9 @@ func (a *app) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{
+		"filename": filepath.Base(real),
+	}))
 	http.ServeContent(w, r, filepath.Base(real), st.ModTime(), f)
 }
 
