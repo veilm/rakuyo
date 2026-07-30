@@ -2,6 +2,13 @@
 
 This is the Delirium-specific workflow documentation for Rakuyo.
 
+## Commits
+
+- Use the workstation's auto commit policy for Rakuyo changes: make one
+  `msk_git ca` commit per logical change after it is complete and verified,
+  subject to the staged/unstaged-worktree exceptions in
+  `/home/light/sync/GOLDEN.md`.
+
 ## Running servers
 
 - After updating Rakuyo, restart any running Rakuyo servers when the changes
